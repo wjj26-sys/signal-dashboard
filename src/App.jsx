@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
+const API_BASE_URL = "https://signal-telegram-server.onrender.com";
 const STORAGE_KEY = "signal-position-archives-v1";
 
 const resultOptions = ["수익 🟢", "손절 🔴", "본절 ⚪", "미진입", "진행중"];
@@ -261,6 +262,9 @@ export default function App() {
   const [saved, setSaved] = useState(false);
   const [archiveCopied, setArchiveCopied] = useState(false);
 
+  const [serverStatus, setServerStatus] = useState(null);
+  const [serverLoading, setServerLoading] = useState(false);
+
   const [tradeDate, setTradeDate] = useState(getTodayText());
   const [tradeSymbol, setTradeSymbol] = useState("XAUUSD");
   const [direction, setDirection] = useState("LONG");
@@ -317,6 +321,39 @@ export default function App() {
 3차 TP: ${formatNumber(calc.thirdTp)}`;
   }, [tradeSymbol, direction, baseEntry, entry2, entry3, calc]);
 
+  const fetchServerStatus = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/status`);
+      const data = await response.json();
+      setServerStatus(data);
+    } catch (error) {
+      console.error("서버 상태 불러오기 실패:", error);
+      setServerStatus(null);
+    }
+  };
+
+  const postServerAction = async (path) => {
+    try {
+      setServerLoading(true);
+
+      const response = await fetch(`${API_BASE_URL}${path}`, {
+        method: "POST",
+      });
+
+      const data = await response.json();
+
+      await fetchServerStatus();
+
+      return data;
+    } catch (error) {
+      alert("서버 연결에 실패했어요. Render 서버가 켜져 있는지 확인해주세요!");
+      console.error(error);
+      return null;
+    } finally {
+      setServerLoading(false);
+    }
+  };
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(archives));
   }, [archives]);
@@ -338,6 +375,16 @@ export default function App() {
         setTradeDate(today);
       }
     }, 60000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    fetchServerStatus();
+
+    const timer = setInterval(() => {
+      fetchServerStatus();
+    }, 5000);
 
     return () => clearInterval(timer);
   }, []);
@@ -426,6 +473,17 @@ export default function App() {
     setTimeout(() => setSaved(false), 1500);
   };
 
+  const handleServerOn = async () => {
+    await postServerAction("/api/manual-on");
+    setIsRunning(true);
+  };
+
+  const handleServerOff = async () => {
+    await postServerAction("/api/finish-signal");
+    await postServerAction("/api/manual-off");
+    finishCurrentSignal();
+  };
+
   return (
     <main className="page">
       <section className="dashboard">
@@ -437,8 +495,12 @@ export default function App() {
                 <h1>미니 관리자</h1>
               </div>
 
-              <span className={`status-pill ${isRunning ? "running" : "waiting"}`}>
-                {isRunning ? "진행중" : "대기중"}
+              <span
+                className={`status-pill ${
+                  serverStatus?.signalRunning || isRunning ? "running" : "waiting"
+                }`}
+              >
+                {serverStatus?.signalRunning || isRunning ? "진행중" : "대기중"}
               </span>
             </div>
 
@@ -470,15 +532,44 @@ export default function App() {
               )}
             </div>
 
+            <div className="server-status-box">
+              <div>
+                <span>서버 연결</span>
+                <strong>{serverStatus ? "연결됨" : "확인중"}</strong>
+              </div>
+
+              <div>
+                <span>봇 상태</span>
+                <strong>{serverStatus?.botEnabled ? "ON" : "OFF"}</strong>
+              </div>
+
+              <div>
+                <span>운영 시간</span>
+                <strong>{serverStatus?.operatingTime ? "운영중" : "운영 외"}</strong>
+              </div>
+
+              <div>
+                <span>진행 상태</span>
+                <strong>{serverStatus?.signalRunning ? "진행중" : "대기중"}</strong>
+              </div>
+            </div>
+
             <div className="button-row">
               <button
-                className={`main-button ${isRunning ? "active" : ""}`}
-                onClick={() => setIsRunning(true)}
+                className={`main-button ${
+                  serverStatus?.botEnabled || isRunning ? "active" : ""
+                }`}
+                onClick={handleServerOn}
+                disabled={serverLoading}
               >
-                ON
+                {serverLoading ? "처리중" : "ON"}
               </button>
 
-              <button className="sub-button" onClick={finishCurrentSignal}>
+              <button
+                className="sub-button"
+                onClick={handleServerOff}
+                disabled={serverLoading}
+              >
                 종료 / OFF
               </button>
             </div>
