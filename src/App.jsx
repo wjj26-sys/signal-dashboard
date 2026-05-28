@@ -2,46 +2,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const API_BASE_URL = "https://signal-telegram-server.onrender.com";
-const STORAGE_KEY = "signal-position-archives-v1";
+const STORAGE_KEY = "signal-position-archives-v2";
 
 const resultOptions = ["수익 🟢", "손절 🔴", "본절 ⚪", "미진입", "진행중"];
 
-const initialSignals = [
-  {
-    id: 1,
-    order: "첫번째 시그널",
-    signal: "1번",
-    startTime: "10:00",
-    endTime: "10:30",
-    result: "+$2000",
-    status: "종료",
-    positions: [
-      { round: "1차", result: "수익 🟢", amount: "2000" },
-      { round: "2차", result: "미진입", amount: "" },
-      { round: "3차", result: "미진입", amount: "" },
-    ],
-  },
-  {
-    id: 2,
-    order: "두번째 시그널",
-    signal: "5번",
-    startTime: "11:20",
-    endTime: "진행중",
-    result: "확인중",
-    status: "진행중",
-    positions: [
-      { round: "1차", result: "진행중", amount: "" },
-      { round: "2차", result: "미진입", amount: "" },
-      { round: "3차", result: "미진입", amount: "" },
-    ],
-  },
-];
-
-const initialBlocked = [
-  { id: 1, signal: "2번", time: "10:05", reason: "진행중 유입으로 미전송" },
-  { id: 2, signal: "3번", time: "10:11", reason: "진행중 유입으로 미전송" },
-  { id: 3, signal: "4번", time: "10:18", reason: "진행중 유입으로 미전송" },
-];
+const initialSignals = [];
+const initialBlocked = [];
 
 function getTodayText() {
   const now = new Date();
@@ -124,6 +90,10 @@ function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
 }
 
 function makePositionText(signals, tradeDate, tradeSymbol) {
+  if (signals.length === 0) {
+    return "";
+  }
+
   const body = signals
     .map((item) => {
       const positionLines = item.positions
@@ -253,7 +223,7 @@ function makeArchiveText(archive) {
 }
 
 export default function App() {
-  const [isRunning, setIsRunning] = useState(true);
+  const [isRunning, setIsRunning] = useState(false);
   const [signals, setSignals] = useState(initialSignals);
   const [blockedSignals] = useState(initialBlocked);
 
@@ -273,10 +243,8 @@ export default function App() {
   const [entry2, setEntry2] = useState("3990");
   const [entry3, setEntry3] = useState("3980");
 
-  const [selectedSignalId, setSelectedSignalId] = useState(2);
-  const [positionDraft, setPositionDraft] = useState(() =>
-    clonePositions(initialSignals[1].positions)
-  );
+  const [selectedSignalId, setSelectedSignalId] = useState("");
+  const [positionDraft, setPositionDraft] = useState(() => makePositionDraft());
 
   const [archives, setArchives] = useState(() => loadArchives());
   const [selectedArchiveKey, setSelectedArchiveKey] = useState("");
@@ -289,6 +257,9 @@ export default function App() {
   const selectedArchive =
     archives.find((archive) => archive.weekKey === selectedArchiveKey) ||
     archives[0];
+
+  const serverActiveSignal = serverStatus?.activeSignal;
+  const isSignalRunning = Boolean(serverStatus?.signalRunning || isRunning);
 
   const positionText = useMemo(
     () => makePositionText(signals, tradeDate, tradeSymbol),
@@ -424,8 +395,15 @@ export default function App() {
   };
 
   const handleSelectSignal = (event) => {
-    const id = Number(event.target.value);
-    const found = signals.find((item) => item.id === id);
+    const id = event.target.value;
+
+    if (!id) {
+      setSelectedSignalId("");
+      setPositionDraft(makePositionDraft());
+      return;
+    }
+
+    const found = signals.find((item) => item.id === Number(id));
 
     setSelectedSignalId(id);
     setPositionDraft(found ? clonePositions(found.positions) : makePositionDraft());
@@ -440,6 +418,11 @@ export default function App() {
   };
 
   const applyPositionRecord = () => {
+    if (!selectedSignalId) {
+      alert("아직 기록 적용할 시그널이 없습니다.");
+      return;
+    }
+
     setSignals((prev) =>
       prev.map((item) => {
         if (item.id !== Number(selectedSignalId)) return item;
@@ -458,6 +441,11 @@ export default function App() {
   };
 
   const savePositionRecord = () => {
+    if (!positionText.trim()) {
+      alert("저장할 포지션 기록이 없습니다.");
+      return;
+    }
+
     const dailyRecord = {
       date: tradeDate,
       symbol: tradeSymbol,
@@ -475,7 +463,6 @@ export default function App() {
 
   const handleServerOn = async () => {
     await postServerAction("/api/manual-on");
-    setIsRunning(true);
   };
 
   const handleServerOff = async () => {
@@ -495,19 +482,30 @@ export default function App() {
                 <h1>미니 관리자</h1>
               </div>
 
-              <span
-                className={`status-pill ${
-                  serverStatus?.signalRunning || isRunning ? "running" : "waiting"
-                }`}
-              >
-                {serverStatus?.signalRunning || isRunning ? "진행중" : "대기중"}
+              <span className={`status-pill ${isSignalRunning ? "running" : "waiting"}`}>
+                {isSignalRunning ? "진행중" : "대기중"}
               </span>
             </div>
 
             <div className="current-box">
               <p className="box-title">현재 상태</p>
 
-              {currentSignal && isRunning ? (
+              {serverActiveSignal ? (
+                <div>
+                  <h2>{serverActiveSignal.order}번째 시그널</h2>
+
+                  <div className="info-grid">
+                    <span>신호</span>
+                    <strong>메시지 #{serverActiveSignal.sourceMessageId}</strong>
+
+                    <span>시작 시간</span>
+                    <strong>{serverActiveSignal.startedAt || "-"}</strong>
+
+                    <span>결과</span>
+                    <strong>{serverActiveSignal.status || "진행중"}</strong>
+                  </div>
+                </div>
+              ) : currentSignal && isRunning ? (
                 <div>
                   <h2>{currentSignal.order}</h2>
 
@@ -556,9 +554,7 @@ export default function App() {
 
             <div className="button-row">
               <button
-                className={`main-button ${
-                  serverStatus?.botEnabled || isRunning ? "active" : ""
-                }`}
+                className={`main-button ${serverStatus?.botEnabled ? "active" : ""}`}
                 onClick={handleServerOn}
                 disabled={serverLoading}
               >
@@ -587,16 +583,20 @@ export default function App() {
             <div className="section-title">미전송 기록</div>
 
             <div className="blocked-list">
-              {blockedSignals.map((item) => (
-                <div className="blocked-item" key={item.id}>
-                  <div>
-                    <strong>{item.signal}</strong>
-                    <p>{item.reason}</p>
-                  </div>
+              {blockedSignals.length === 0 ? (
+                <div className="empty-box">아직 미전송 기록이 없습니다.</div>
+              ) : (
+                blockedSignals.map((item) => (
+                  <div className="blocked-item" key={item.id}>
+                    <div>
+                      <strong>{item.signal}</strong>
+                      <p>{item.reason}</p>
+                    </div>
 
-                  <span>{item.time}</span>
-                </div>
-              ))}
+                    <span>{item.time}</span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </aside>
@@ -709,11 +709,15 @@ export default function App() {
             <div className="form-field position-select">
               <label>기록 적용할 시그널</label>
               <select value={selectedSignalId} onChange={handleSelectSignal}>
-                {signals.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.order} / {item.signal}
-                  </option>
-                ))}
+                {signals.length === 0 ? (
+                  <option value="">기록할 시그널 없음</option>
+                ) : (
+                  signals.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.order} / {item.signal}
+                    </option>
+                  ))
+                )}
               </select>
             </div>
 
@@ -753,9 +757,13 @@ export default function App() {
               선택 결과 반영하기
             </button>
 
-            {selectedSignal && (
+            {selectedSignal ? (
               <p className="muted-note selected-note">
                 현재 선택: {selectedSignal.order} / {selectedSignal.signal}
+              </p>
+            ) : (
+              <p className="muted-note selected-note">
+                아직 기록할 시그널이 없습니다.
               </p>
             )}
           </div>
@@ -780,24 +788,32 @@ export default function App() {
                 </thead>
 
                 <tbody>
-                  {signals.map((item) => (
-                    <tr key={item.id}>
-                      <td>{item.order}</td>
-                      <td>{item.signal}</td>
-                      <td>{item.startTime}</td>
-                      <td>{item.endTime}</td>
-                      <td>{item.result}</td>
-                      <td>
-                        <span
-                          className={`mini-status ${
-                            item.status === "진행중" ? "running" : "done"
-                          }`}
-                        >
-                          {item.status}
-                        </span>
+                  {signals.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" className="empty-table-cell">
+                        아직 전송된 시그널이 없습니다.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    signals.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.order}</td>
+                        <td>{item.signal}</td>
+                        <td>{item.startTime}</td>
+                        <td>{item.endTime}</td>
+                        <td>{item.result}</td>
+                        <td>
+                          <span
+                            className={`mini-status ${
+                              item.status === "진행중" ? "running" : "done"
+                            }`}
+                          >
+                            {item.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -821,7 +837,11 @@ export default function App() {
               </div>
             </div>
 
-            <textarea value={positionText} readOnly />
+            <textarea
+              value={positionText}
+              readOnly
+              placeholder="포지션 기록이 생성되면 여기에 표시됩니다."
+            />
           </div>
 
           <div className="archive-column">

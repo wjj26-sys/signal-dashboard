@@ -650,3 +650,11 @@ textarea:focus {
   font-size: 14px;
   font-weight: 950;
 }
+
+.empty-table-cell {
+  padding: 24px 13px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+}
