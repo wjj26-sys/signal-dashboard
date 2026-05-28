@@ -332,7 +332,8 @@ app.get("/api/set-webhook", async (req, res) => {
     if (!publicUrl) {
       return res.status(400).json({
         ok: false,
-        error: "url 파라미터가 필요합니다. 예: /api/set-webhook?url=https://xxxx.ngrok-free.app",
+        error:
+          "url 파라미터가 필요합니다. 예: /api/set-webhook?url=https://xxxx.onrender.com",
       });
     }
 
