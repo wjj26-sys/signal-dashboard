@@ -1,6 +1,5 @@
 import express from "express";
 import dotenv from "dotenv";
-import cron from "node-cron";
 import cors from "cors";
 
 dotenv.config();
@@ -20,7 +19,22 @@ const SOURCE_CHAT_ID = process.env.SOURCE_CHAT_ID;
 const TARGET_CHAT_ID = process.env.TARGET_CHAT_ID;
 const PORT = process.env.PORT || 4000;
 
-let botEnabled = false;
+const orderNames = [
+  "첫번째",
+  "두번째",
+  "세번째",
+  "네번째",
+  "다섯번째",
+  "여섯번째",
+  "일곱번째",
+  "여덟번째",
+  "아홉번째",
+  "열번째",
+];
+
+// 봇은 계속 ON 상태로 유지합니다.
+// signalRunning이 true면 "포지션 진행중 / 새 신호 잠금" 상태입니다.
+let botEnabled = true;
 let signalRunning = false;
 let testMode = false;
 let activeSignal = null;
@@ -43,21 +57,46 @@ function getTimeText() {
 }
 
 function isOperatingTime() {
-  const now = getKstNow();
+  return true;
+}
 
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-  const currentMinutes = hour * 60 + minute;
+function getMessageText(message) {
+  return message.text || message.caption || "";
+}
 
-  const startMinutes = 9 * 60;
-  const endMinutes = 10 * 60;
+function getSignalDirection(message) {
+  const text = getMessageText(message).toUpperCase();
 
-  return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  if (text.includes("BUY") || text.includes("LONG") || text.includes("롱")) {
+    return "BUY";
+  }
+
+  if (text.includes("SELL") || text.includes("SHORT") || text.includes("숏")) {
+    return "SELL";
+  }
+
+  return "이미지 신호";
+}
+
+function hasSignalImage(message) {
+  const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
+
+  const hasImageDocument =
+    message.document?.mime_type &&
+    String(message.document.mime_type).startsWith("image/");
+
+  return Boolean(hasPhoto || hasImageDocument);
+}
+
+function isSignalMessage(message) {
+  // 현재 기준: 사진이 포함된 메시지만 신호로 판단합니다.
+  // BUY/SELL 이미지가 항상 같이 온다면 이 기준이 가장 빠르고 안전합니다.
+  return hasSignalImage(message);
 }
 
 async function telegramApi(method, body) {
   if (!BOT_TOKEN) {
-    throw new Error("BOT_TOKEN이 .env에 없습니다.");
+    throw new Error("BOT_TOKEN이 Render 환경변수 또는 .env에 없습니다.");
   }
 
   const response = await fetch(
@@ -83,7 +122,7 @@ async function telegramApi(method, body) {
 
 async function forwardMessageToTarget(message) {
   if (!TARGET_CHAT_ID) {
-    throw new Error("TARGET_CHAT_ID가 .env에 없습니다.");
+    throw new Error("TARGET_CHAT_ID가 Render 환경변수 또는 .env에 없습니다.");
   }
 
   return telegramApi("forwardMessage", {
@@ -94,12 +133,16 @@ async function forwardMessageToTarget(message) {
 }
 
 function addBlockedSignal(message, reason) {
+  const direction = getSignalDirection(message);
+
   blockedSignals.push({
     id: blockedSignals.length + 1,
+    signal: direction,
     messageId: message.message_id,
     sourceChatId: message.chat.id,
     time: getTimeText(),
     reason,
+    text: getMessageText(message),
   });
 }
 
@@ -110,16 +153,17 @@ async function handleSignalMessage(message) {
     return;
   }
 
+  // 사진 없는 일반 텍스트/잡담은 신호로 보지 않습니다.
+  if (!isSignalMessage(message)) {
+    return;
+  }
+
   if (!botEnabled) {
-    addBlockedSignal(message, "봇이 OFF 상태라 미전송");
+    addBlockedSignal(message, "봇이 비활성 상태라 미전송");
     return;
   }
 
-  if (!testMode && !isOperatingTime()) {
-    addBlockedSignal(message, "운영 시간이 아니어서 미전송");
-    return;
-  }
-
+  // 포지션 진행중이면 새 신호는 전달하지 않고 기록만 남깁니다.
   if (signalRunning) {
     addBlockedSignal(message, "진행중 유입으로 미전송");
     return;
@@ -127,6 +171,7 @@ async function handleSignalMessage(message) {
 
   const order = sentSignals.length + 1;
   const startedAt = getTimeText();
+  const direction = getSignalDirection(message);
 
   const forwarded = await forwardMessageToTarget(message);
 
@@ -135,10 +180,14 @@ async function handleSignalMessage(message) {
   activeSignal = {
     id: order,
     order,
+    orderText: `${orderNames[order - 1] || `${order}번째`} 시그널`,
+    signal: direction,
     sourceMessageId: message.message_id,
     forwardedMessageId: forwarded.message_id,
     startedAt,
+    endedAt: null,
     status: "진행중",
+    text: getMessageText(message),
   };
 
   sentSignals.push(activeSignal);
@@ -155,90 +204,160 @@ app.get("/api/status", (req, res) => {
     botEnabled,
     operatingTime: isOperatingTime(),
     signalRunning,
+    canReceiveSignal: botEnabled && !signalRunning,
+    testMode,
     activeSignal,
     sentSignals,
     blockedSignals,
   });
 });
 
+// 기존 프론트 호환용.
+// 이제 manual-on은 봇 ON이 아니라 "포지션 잠금 해제 / 다음 신호 받을 수 있음" 의미입니다.
 app.post("/api/manual-on", (req, res) => {
+  botEnabled = true;
+  signalRunning = false;
+  activeSignal = null;
+
+  res.json({
+    ok: true,
+    message: "전달 가능 상태입니다. 다음 이미지 신호를 받을 수 있습니다.",
+    botEnabled,
+    signalRunning,
+    canReceiveSignal: true,
+  });
+});
+
+// 기존 프론트 호환용.
+// 봇을 실제로 끄지 않습니다. 봇은 계속 ON 상태를 유지합니다.
+app.post("/api/manual-off", (req, res) => {
+  botEnabled = true;
+
+  res.json({
+    ok: true,
+    message: "봇은 계속 ON 상태입니다. 포지션 종료는 /api/finish-signal에서 처리됩니다.",
+    botEnabled,
+    signalRunning,
+    canReceiveSignal: botEnabled && !signalRunning,
+  });
+});
+
+// 포지션 종료 버튼.
+// 포지션을 종료하고 다음 신호를 받을 수 있게 잠금을 해제합니다.
+app.post("/api/finish-signal", (req, res) => {
+  const endedAt = getTimeText();
+
+  if (activeSignal) {
+    activeSignal.status = "종료";
+    activeSignal.endedAt = endedAt;
+
+    sentSignals = sentSignals.map((item) =>
+      item.id === activeSignal.id
+        ? {
+            ...item,
+            status: "종료",
+            endedAt,
+          }
+        : item
+    );
+  }
+
+  signalRunning = false;
+  activeSignal = null;
+  botEnabled = true;
+
+  res.json({
+    ok: true,
+    message: "포지션이 종료되었습니다. 다음 신호를 받을 수 있습니다.",
+    botEnabled,
+    signalRunning,
+    canReceiveSignal: true,
+    sentSignals,
+    blockedSignals,
+  });
+});
+
+// 필요할 때 수동으로 포지션 잠금 상태를 만들 수 있는 API입니다.
+app.post("/api/lock-position", (req, res) => {
+  botEnabled = true;
+  signalRunning = true;
+
+  activeSignal = activeSignal || {
+    id: sentSignals.length + 1,
+    order: sentSignals.length + 1,
+    orderText: `${orderNames[sentSignals.length] || `${sentSignals.length + 1}번째`} 시그널`,
+    signal: "수동 잠금",
+    sourceMessageId: null,
+    forwardedMessageId: null,
+    startedAt: getTimeText(),
+    endedAt: null,
+    status: "진행중",
+    text: "관리자가 수동으로 포지션 진행중 상태로 변경했습니다.",
+  };
+
+  res.json({
+    ok: true,
+    message: "포지션 진행중 상태로 잠금 처리되었습니다.",
+    botEnabled,
+    signalRunning,
+    activeSignal,
+  });
+});
+
+app.delete("/api/sent-signals/:id", (req, res) => {
+  const id = Number(req.params.id);
+
+  sentSignals = sentSignals.filter((item) => item.id !== id);
+
+  if (activeSignal?.id === id) {
+    activeSignal = null;
+    signalRunning = false;
+  }
+
+  res.json({
+    ok: true,
+    message: "전송된 시그널 1개를 삭제했습니다.",
+    sentSignals,
+    activeSignal,
+    signalRunning,
+  });
+});
+
+app.delete("/api/blocked-signals/:id", (req, res) => {
+  const id = Number(req.params.id);
+
+  blockedSignals = blockedSignals.filter((item) => item.id !== id);
+
+  res.json({
+    ok: true,
+    message: "미전송 기록 1개를 삭제했습니다.",
+    blockedSignals,
+  });
+});
+
+app.get("/api/test-mode-on", (req, res) => {
+  testMode = true;
   botEnabled = true;
 
   res.json({
     ok: true,
     botEnabled,
+    testMode,
+    message: "테스트 모드 ON입니다. 현재는 운영시간 제한 없이 항상 작동합니다.",
   });
 });
 
-app.post("/api/manual-off", (req, res) => {
-  botEnabled = false;
+app.get("/api/test-mode-off", (req, res) => {
+  testMode = false;
+  botEnabled = true;
 
   res.json({
     ok: true,
     botEnabled,
+    testMode,
+    message: "테스트 모드 OFF입니다. 현재는 운영시간 제한 없이 항상 작동합니다.",
   });
 });
-
-app.post("/api/finish-signal", (req, res) => {
-  signalRunning = false;
-
-  if (activeSignal) {
-    activeSignal.status = "종료";
-    activeSignal.endedAt = getTimeText();
-  }
-
-  activeSignal = null;
-
-  res.json({
-    ok: true,
-    signalRunning,
-  });
-});
-
-app.post("/telegram/webhook", async (req, res) => {
-  try {
-    const update = req.body;
-
-    if (update.message) {
-      await handleSignalMessage(update.message);
-    }
-
-    if (update.channel_post) {
-      await handleSignalMessage(update.channel_post);
-    }
-
-    res.sendStatus(200);
-  } catch (error) {
-    console.error(error.message);
-    res.sendStatus(500);
-  }
-});
-
-// 매일 09:00 KST 자동 ON
-cron.schedule(
-  "0 9 * * *",
-  () => {
-    botEnabled = true;
-    console.log("09:00 KST 자동 ON");
-  },
-  {
-    timezone: "Asia/Seoul",
-  }
-);
-
-// 매일 10:00 KST 자동 OFF
-cron.schedule(
-  "0 10 * * *",
-  () => {
-    botEnabled = false;
-    signalRunning = false;
-    activeSignal = null;
-    console.log("10:00 KST 자동 OFF");
-  },
-  {
-    timezone: "Asia/Seoul",
-  }
-);
 
 app.get("/api/telegram-updates", async (req, res) => {
   try {
@@ -257,9 +376,16 @@ app.get("/api/telegram-updates", async (req, res) => {
       return {
         updateId: update.update_id,
         chatId: message.chat.id,
-        chatTitle: message.chat.title || message.chat.username || message.chat.first_name,
+        chatTitle:
+          message.chat.title || message.chat.username || message.chat.first_name,
         chatType: message.chat.type,
         text: message.text || message.caption || "",
+        hasPhoto: Boolean(message.photo?.length),
+        hasImageDocument: Boolean(
+          message.document?.mime_type &&
+            String(message.document.mime_type).startsWith("image/")
+        ),
+        signalDirection: getSignalDirection(message),
         messageId: message.message_id,
       };
     });
@@ -282,14 +408,16 @@ app.get("/api/test-forward-latest", async (req, res) => {
     const messages = updates
       .map((update) => update.message || update.channel_post)
       .filter(Boolean)
-      .filter((message) => String(message.chat.id) === String(SOURCE_CHAT_ID));
+      .filter((message) => String(message.chat.id) === String(SOURCE_CHAT_ID))
+      .filter((message) => isSignalMessage(message));
 
     const latestMessage = messages[messages.length - 1];
 
     if (!latestMessage) {
       return res.status(404).json({
         ok: false,
-        message: "원본방에서 찾은 최신 메시지가 없습니다. 원본방에 테스트 메시지를 하나 보내주세요.",
+        message:
+          "원본방에서 찾은 이미지 신호가 없습니다. 원본방에 BUY/SELL 이미지 포함 메시지를 보내주세요.",
       });
     }
 
@@ -297,7 +425,7 @@ app.get("/api/test-forward-latest", async (req, res) => {
 
     res.json({
       ok: true,
-      message: "최신 메시지를 전달방으로 전달했습니다.",
+      message: "최신 이미지 신호를 전달방으로 전달했습니다.",
       sourceChatId: latestMessage.chat.id,
       sourceMessageId: latestMessage.message_id,
       forwardedMessageId: forwarded.message_id,
@@ -308,29 +436,6 @@ app.get("/api/test-forward-latest", async (req, res) => {
       error: error.message,
     });
   }
-});
-
-app.get("/api/test-mode-on", (req, res) => {
-  botEnabled = true;
-  testMode = true;
-
-  res.json({
-    ok: true,
-    botEnabled,
-    testMode,
-    message: "테스트 모드 ON: 운영 시간과 상관없이 신호를 받을 수 있습니다.",
-  });
-});
-
-app.get("/api/test-mode-off", (req, res) => {
-  testMode = false;
-
-  res.json({
-    ok: true,
-    botEnabled,
-    testMode,
-    message: "테스트 모드 OFF: 09:00~10:00 운영 시간만 적용됩니다.",
-  });
 });
 
 app.get("/api/set-webhook", async (req, res) => {
@@ -368,6 +473,7 @@ app.get("/api/set-webhook", async (req, res) => {
 app.get("/api/webhook-info", async (req, res) => {
   try {
     const result = await telegramApi("getWebhookInfo", {});
+
     res.json({
       ok: true,
       result,
@@ -377,6 +483,25 @@ app.get("/api/webhook-info", async (req, res) => {
       ok: false,
       error: error.message,
     });
+  }
+});
+
+app.post("/telegram/webhook", async (req, res) => {
+  try {
+    const update = req.body;
+
+    if (update.message) {
+      await handleSignalMessage(update.message);
+    }
+
+    if (update.channel_post) {
+      await handleSignalMessage(update.channel_post);
+    }
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("Webhook Error:", error.message);
+    res.sendStatus(500);
   }
 });
 
