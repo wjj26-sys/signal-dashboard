@@ -409,6 +409,25 @@ export default function App() {
     );
   };
 
+  const deleteSelectedArchive = () => {
+    if (!selectedArchive) {
+      alert("삭제할 주간 정리본이 없습니다.");
+      return;
+    }
+
+    const range = formatShortRange(selectedArchive.startDate, selectedArchive.endDate);
+
+    const ok = window.confirm(`${range} 주간 정리본을 삭제할까요?`);
+
+    if (!ok) return;
+
+    setArchives((prev) =>
+      prev.filter((archive) => archive.weekKey !== selectedArchive.weekKey)
+    );
+
+    setSelectedArchiveKey("");
+  };
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(archives));
   }, [archives]);
@@ -1023,12 +1042,22 @@ export default function App() {
               <div className="table-header">
                 <div className="section-title">주간 정리본</div>
 
-                <button
-                  className="copy-button"
-                  onClick={() => copyText(archiveText, setArchiveCopied)}
-                >
-                  {archiveCopied ? "복사완료" : "주간 복사"}
-                </button>
+                <div className="record-actions">
+                  <button
+                    className="delete-mini-button"
+                    onClick={deleteSelectedArchive}
+                    disabled={!selectedArchive}
+                  >
+                    삭제
+                  </button>
+
+                  <button
+                    className="copy-button"
+                    onClick={() => copyText(archiveText, setArchiveCopied)}
+                  >
+                    {archiveCopied ? "복사완료" : "주간 복사"}
+                  </button>
+                </div>
               </div>
 
               <textarea value={archiveText} readOnly />
