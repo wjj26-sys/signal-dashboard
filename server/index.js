@@ -41,8 +41,6 @@ const orderNames = [
   "열번째",
 ];
 
-// 봇은 계속 ON 상태로 유지합니다.
-// signalRunning이 true면 "포지션 진행중 / 새 신호 잠금" 상태입니다.
 let botEnabled = true;
 let signalRunning = false;
 let testMode = false;
@@ -102,7 +100,7 @@ function getSignalDirection(message) {
     return "SELL";
   }
 
-  return "이미지 신호";
+  return "";
 }
 
 function hasSignalImage(message) {
@@ -116,7 +114,6 @@ function hasSignalImage(message) {
 }
 
 function isSignalMessage(message) {
-  // 현재 기준: 사진이 포함된 메시지만 신호로 판단합니다.
   return hasSignalImage(message);
 }
 
@@ -128,6 +125,182 @@ function requireSupabase() {
   }
 
   return supabase;
+}
+
+function mapSentLog(row) {
+  return {
+    id: row.id,
+    order: row.signal_order,
+    orderText:
+      row.order_text ||
+      `${orderNames[(row.signal_order || 1) - 1] || `${row.signal_order}번째`} 시그널`,
+    signal: row.signal || "",
+    sourceMessageId: row.source_message_id,
+    forwardedMessageId: row.forwarded_message_id,
+    sourceChatId: row.source_chat_id,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    status: row.status || "진행중",
+    text: row.message_text || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapBlockedLog(row) {
+  return {
+    id: row.id,
+    signal: row.signal || "",
+    messageId: row.source_message_id,
+    sourceChatId: row.source_chat_id,
+    time: row.started_at,
+    reason: row.reason || "미전송",
+    text: row.message_text || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function syncSignalLogsFromDb() {
+  if (!supabase) return;
+
+  const { data, error } = await supabase
+    .from("signal_logs")
+    .select("*")
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+
+  const rows = data || [];
+
+  sentSignals = rows
+    .filter((row) => row.log_type === "sent")
+    .map(mapSentLog);
+
+  blockedSignals = rows
+    .filter((row) => row.log_type === "blocked")
+    .map(mapBlockedLog);
+
+  activeSignal =
+    [...sentSignals].reverse().find((item) => item.status === "진행중") ||
+    null;
+
+  signalRunning = Boolean(activeSignal);
+}
+
+async function createSentSignalLog(payload) {
+  if (!supabase) {
+    sentSignals.push(payload);
+    activeSignal = payload;
+    signalRunning = true;
+    return payload;
+  }
+
+  const { data, error } = await supabase
+    .from("signal_logs")
+    .insert({
+      log_type: "sent",
+      signal_order: payload.order,
+      order_text: payload.orderText,
+      signal: payload.signal || "",
+      source_message_id: payload.sourceMessageId,
+      forwarded_message_id: payload.forwardedMessageId,
+      source_chat_id: payload.sourceChatId,
+      started_at: payload.startedAt,
+      ended_at: payload.endedAt,
+      status: payload.status,
+      message_text: payload.text || "",
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  const mapped = mapSentLog(data);
+
+  await syncSignalLogsFromDb();
+
+  return mapped;
+}
+
+async function createBlockedSignalLog(payload) {
+  if (!supabase) {
+    blockedSignals.push(payload);
+    return payload;
+  }
+
+  const { data, error } = await supabase
+    .from("signal_logs")
+    .insert({
+      log_type: "blocked",
+      signal_order: null,
+      order_text: null,
+      signal: payload.signal || "",
+      source_message_id: payload.messageId,
+      forwarded_message_id: null,
+      source_chat_id: payload.sourceChatId,
+      started_at: payload.time,
+      ended_at: null,
+      status: "미전송",
+      reason: payload.reason,
+      message_text: payload.text || "",
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  const mapped = mapBlockedLog(data);
+
+  await syncSignalLogsFromDb();
+
+  return mapped;
+}
+
+async function finishActiveSignalLog() {
+  const endedAt = getTimeText();
+
+  if (!activeSignal) {
+    await syncSignalLogsFromDb();
+  }
+
+  if (!activeSignal) {
+    signalRunning = false;
+    return null;
+  }
+
+  if (supabase) {
+    const { error } = await supabase
+      .from("signal_logs")
+      .update({
+        status: "종료",
+        ended_at: endedAt,
+      })
+      .eq("id", activeSignal.id);
+
+    if (error) throw error;
+
+    await syncSignalLogsFromDb();
+    return activeSignal;
+  }
+
+  activeSignal.status = "종료";
+  activeSignal.endedAt = endedAt;
+
+  sentSignals = sentSignals.map((item) =>
+    String(item.id) === String(activeSignal.id)
+      ? {
+          ...item,
+          status: "종료",
+          endedAt,
+        }
+      : item
+  );
+
+  signalRunning = false;
+  activeSignal = null;
+
+  return null;
 }
 
 function enrichArchive(group) {
@@ -191,12 +364,9 @@ async function cleanupOldPositionWeeks() {
   if (error) throw error;
 
   const weekKeys = [...new Set((data || []).map((item) => item.week_key))];
-  const keepWeeks = weekKeys.slice(0, 2);
   const deleteWeeks = weekKeys.slice(2);
 
-  if (deleteWeeks.length === 0) {
-    return;
-  }
+  if (deleteWeeks.length === 0) return;
 
   const { error: deleteError } = await db
     .from("position_records")
@@ -244,11 +414,13 @@ async function forwardMessageToTarget(message) {
   });
 }
 
-function addBlockedSignal(message, reason) {
+async function addBlockedSignal(message, reason) {
   const direction = getSignalDirection(message);
 
-  blockedSignals.push({
-    id: blockedSignals.length + 1,
+  const fallbackId = blockedSignals.length + 1;
+
+  return createBlockedSignalLog({
+    id: fallbackId,
     signal: direction,
     messageId: message.message_id,
     sourceChatId: message.chat.id,
@@ -265,84 +437,113 @@ async function handleSignalMessage(message) {
     return;
   }
 
-  // 사진 없는 일반 텍스트/잡담은 신호로 보지 않습니다.
   if (!isSignalMessage(message)) {
     return;
   }
 
+  await syncSignalLogsFromDb();
+
   if (!botEnabled) {
-    addBlockedSignal(message, "봇이 비활성 상태라 미전송");
+    await addBlockedSignal(message, "봇이 비활성 상태라 미전송");
     return;
   }
 
-  // 포지션 진행중이면 새 신호는 전달하지 않고 기록만 남깁니다.
   if (signalRunning) {
-    addBlockedSignal(message, "진행중 유입으로 미전송");
+    await addBlockedSignal(message, "진행중 유입으로 미전송");
     return;
   }
 
-  const order = sentSignals.length + 1;
+  const maxOrder = sentSignals.reduce(
+    (max, item) => Math.max(max, Number(item.order) || 0),
+    0
+  );
+
+  const order = maxOrder + 1;
   const startedAt = getTimeText();
   const direction = getSignalDirection(message);
 
   const forwarded = await forwardMessageToTarget(message);
 
-  signalRunning = true;
-
-  activeSignal = {
+  const newSignal = {
     id: order,
     order,
     orderText: `${orderNames[order - 1] || `${order}번째`} 시그널`,
     signal: direction,
     sourceMessageId: message.message_id,
     forwardedMessageId: forwarded.message_id,
+    sourceChatId: message.chat.id,
     startedAt,
     endedAt: null,
     status: "진행중",
     text: getMessageText(message),
   };
 
-  sentSignals.push(activeSignal);
+  const savedSignal = await createSentSignalLog(newSignal);
 
-  console.log("신호 전달 완료:", activeSignal);
+  signalRunning = true;
+  activeSignal = savedSignal;
+
+  console.log("신호 전달 완료:", savedSignal);
 }
 
 app.get("/", (req, res) => {
   res.send("Signal server is running.");
 });
 
-app.get("/api/status", (req, res) => {
-  res.json({
-    botEnabled,
-    operatingTime: isOperatingTime(),
-    signalRunning,
-    canReceiveSignal: botEnabled && !signalRunning,
-    testMode,
-    activeSignal,
-    sentSignals,
-    blockedSignals,
-    supabaseConnected: Boolean(supabase),
-  });
+app.get("/api/status", async (req, res) => {
+  try {
+    await syncSignalLogsFromDb();
+
+    res.json({
+      botEnabled,
+      operatingTime: isOperatingTime(),
+      signalRunning,
+      canReceiveSignal: botEnabled && !signalRunning,
+      testMode,
+      activeSignal,
+      sentSignals,
+      blockedSignals,
+      supabaseConnected: Boolean(supabase),
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
 });
 
-// 기존 프론트 호환용.
-// 이제 manual-on은 봇 ON이 아니라 "포지션 잠금 해제 / 다음 신호 받을 수 있음" 의미입니다.
-app.post("/api/manual-on", (req, res) => {
-  botEnabled = true;
-  signalRunning = false;
-  activeSignal = null;
+app.post("/api/manual-on", async (req, res) => {
+  try {
+    await syncSignalLogsFromDb();
 
-  res.json({
-    ok: true,
-    message: "전달 가능 상태입니다. 다음 이미지 신호를 받을 수 있습니다.",
-    botEnabled,
-    signalRunning,
-    canReceiveSignal: true,
-  });
+    if (activeSignal) {
+      await finishActiveSignalLog();
+    }
+
+    botEnabled = true;
+    signalRunning = false;
+    activeSignal = null;
+
+    await syncSignalLogsFromDb();
+
+    res.json({
+      ok: true,
+      message: "전달 가능 상태입니다. 다음 이미지 신호를 받을 수 있습니다.",
+      botEnabled,
+      signalRunning,
+      canReceiveSignal: true,
+      sentSignals,
+      blockedSignals,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
 });
 
-// 기존 프론트 호환용.
-// 봇을 실제로 끄지 않습니다. 봇은 계속 ON 상태를 유지합니다.
 app.post("/api/manual-off", (req, res) => {
   botEnabled = true;
 
@@ -355,104 +556,147 @@ app.post("/api/manual-off", (req, res) => {
   });
 });
 
-// 포지션 종료 버튼.
-// 포지션을 종료하고 다음 신호를 받을 수 있게 잠금을 해제합니다.
-app.post("/api/finish-signal", (req, res) => {
-  const endedAt = getTimeText();
+app.post("/api/finish-signal", async (req, res) => {
+  try {
+    await syncSignalLogsFromDb();
+    await finishActiveSignalLog();
 
-  if (activeSignal) {
-    activeSignal.status = "종료";
-    activeSignal.endedAt = endedAt;
-
-    sentSignals = sentSignals.map((item) =>
-      item.id === activeSignal.id
-        ? {
-            ...item,
-            status: "종료",
-            endedAt,
-          }
-        : item
-    );
-  }
-
-  signalRunning = false;
-  activeSignal = null;
-  botEnabled = true;
-
-  res.json({
-    ok: true,
-    message: "포지션이 종료되었습니다. 다음 신호를 받을 수 있습니다.",
-    botEnabled,
-    signalRunning,
-    canReceiveSignal: true,
-    sentSignals,
-    blockedSignals,
-  });
-});
-
-// 필요할 때 수동으로 포지션 잠금 상태를 만들 수 있는 API입니다.
-app.post("/api/lock-position", (req, res) => {
-  botEnabled = true;
-  signalRunning = true;
-
-  activeSignal = activeSignal || {
-    id: sentSignals.length + 1,
-    order: sentSignals.length + 1,
-    orderText: `${
-      orderNames[sentSignals.length] || `${sentSignals.length + 1}번째`
-    } 시그널`,
-    signal: "수동 잠금",
-    sourceMessageId: null,
-    forwardedMessageId: null,
-    startedAt: getTimeText(),
-    endedAt: null,
-    status: "진행중",
-    text: "관리자가 수동으로 포지션 진행중 상태로 변경했습니다.",
-  };
-
-  res.json({
-    ok: true,
-    message: "포지션 진행중 상태로 잠금 처리되었습니다.",
-    botEnabled,
-    signalRunning,
-    activeSignal,
-  });
-});
-
-app.delete("/api/sent-signals/:id", (req, res) => {
-  const id = Number(req.params.id);
-
-  sentSignals = sentSignals.filter((item) => item.id !== id);
-
-  if (activeSignal?.id === id) {
-    activeSignal = null;
     signalRunning = false;
+    activeSignal = null;
+    botEnabled = true;
+
+    await syncSignalLogsFromDb();
+
+    res.json({
+      ok: true,
+      message: "포지션이 종료되었습니다. 다음 신호를 받을 수 있습니다.",
+      botEnabled,
+      signalRunning,
+      canReceiveSignal: true,
+      sentSignals,
+      blockedSignals,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
   }
-
-  res.json({
-    ok: true,
-    message: "전송된 시그널 1개를 삭제했습니다.",
-    sentSignals,
-    activeSignal,
-    signalRunning,
-  });
 });
 
-app.delete("/api/blocked-signals/:id", (req, res) => {
-  const id = Number(req.params.id);
+app.post("/api/lock-position", async (req, res) => {
+  try {
+    botEnabled = true;
+    signalRunning = true;
 
-  blockedSignals = blockedSignals.filter((item) => item.id !== id);
+    if (!activeSignal) {
+      const maxOrder = sentSignals.reduce(
+        (max, item) => Math.max(max, Number(item.order) || 0),
+        0
+      );
 
-  res.json({
-    ok: true,
-    message: "미전송 기록 1개를 삭제했습니다.",
-    blockedSignals,
-  });
+      const order = maxOrder + 1;
+
+      activeSignal = await createSentSignalLog({
+        id: order,
+        order,
+        orderText: `${orderNames[order - 1] || `${order}번째`} 시그널`,
+        signal: "",
+        sourceMessageId: null,
+        forwardedMessageId: null,
+        sourceChatId: null,
+        startedAt: getTimeText(),
+        endedAt: null,
+        status: "진행중",
+        text: "관리자가 수동으로 포지션 진행중 상태로 변경했습니다.",
+      });
+    }
+
+    res.json({
+      ok: true,
+      message: "포지션 진행중 상태로 잠금 처리되었습니다.",
+      botEnabled,
+      signalRunning,
+      activeSignal,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
 });
 
-// ===============================
-// Supabase 포지션 기록 API
-// ===============================
+app.delete("/api/sent-signals/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (supabase) {
+      const { error } = await supabase
+        .from("signal_logs")
+        .delete()
+        .eq("id", id)
+        .eq("log_type", "sent");
+
+      if (error) throw error;
+
+      await syncSignalLogsFromDb();
+    } else {
+      sentSignals = sentSignals.filter((item) => String(item.id) !== String(id));
+
+      if (String(activeSignal?.id) === String(id)) {
+        activeSignal = null;
+        signalRunning = false;
+      }
+    }
+
+    res.json({
+      ok: true,
+      message: "전송된 시그널 1개를 삭제했습니다.",
+      sentSignals,
+      activeSignal,
+      signalRunning,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.delete("/api/blocked-signals/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (supabase) {
+      const { error } = await supabase
+        .from("signal_logs")
+        .delete()
+        .eq("id", id)
+        .eq("log_type", "blocked");
+
+      if (error) throw error;
+
+      await syncSignalLogsFromDb();
+    } else {
+      blockedSignals = blockedSignals.filter(
+        (item) => String(item.id) !== String(id)
+      );
+    }
+
+    res.json({
+      ok: true,
+      message: "미전송 기록 1개를 삭제했습니다.",
+      blockedSignals,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
 
 app.get("/api/position-records", async (req, res) => {
   try {
