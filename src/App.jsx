@@ -231,7 +231,7 @@ export default function App() {
 
   const currentSignal = signals.find((item) => item.status === "진행중");
   const selectedSignal = signals.find(
-    (item) => item.id === Number(selectedSignalId)
+    (item) => String(item.id) === String(selectedSignalId)
   );
 
   const selectedArchive =
@@ -557,7 +557,7 @@ export default function App() {
       return;
     }
 
-    const found = signals.find((item) => item.id === Number(id));
+    const found = signals.find((item) => String(item.id) === String(id));
 
     setSelectedSignalId(id);
     setPositionDraft(found ? clonePositions(found.positions) : makePositionDraft());
@@ -579,7 +579,7 @@ export default function App() {
 
     setSignals((prev) =>
       prev.map((item) => {
-        if (item.id !== Number(selectedSignalId)) return item;
+        if (String(item.id) !== String(selectedSignalId)) return item;
 
         const moneyResults = positionDraft
           .filter((position) => position.amount.trim() !== "")
