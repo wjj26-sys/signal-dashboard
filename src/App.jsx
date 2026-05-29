@@ -816,7 +816,6 @@ export default function App() {
                 blockedSignals.map((item) => (
                   <div className="blocked-item" key={item.id}>
                     <div>
-                      <strong>{item.id}번</strong>
                       <p>{item.reason}</p>
                     </div>
 
