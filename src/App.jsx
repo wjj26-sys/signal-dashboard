@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const API_BASE_URL = "https://signal-telegram-server.onrender.com";
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "";
+const AUTH_STORAGE_KEY = "signal-dashboard-auth-v1";
 
 const resultOptions = ["수익 🟢", "손절 🔴", "본절 ⚪", "미진입", "진행중"];
 
@@ -195,6 +197,11 @@ function makeArchiveText(archive) {
 }
 
 export default function App() {
+    const [passwordInput, setPasswordInput] = useState("");
+  const [isAuthorized, setIsAuthorized] = useState(() => {
+    return localStorage.getItem(AUTH_STORAGE_KEY) === "true";
+  });
+  const [passwordError, setPasswordError] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [signals, setSignals] = useState(initialSignals);
   const [blockedSignals, setBlockedSignals] = useState(initialBlocked);
@@ -631,6 +638,56 @@ export default function App() {
     await postServerAction("/api/manual-on");
   };
 
+  const handleLogin = (event) => {
+    event.preventDefault();
+
+    if (!ADMIN_PASSWORD) {
+      setPasswordError("관리자 비밀번호가 아직 설정되지 않았습니다.");
+      return;
+    }
+
+    if (passwordInput === ADMIN_PASSWORD) {
+      localStorage.setItem(AUTH_STORAGE_KEY, "true");
+      setIsAuthorized(true);
+      setPasswordError("");
+      return;
+    }
+
+    setPasswordError("비밀번호가 맞지 않습니다.");
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    setIsAuthorized(false);
+    setPasswordInput("");
+  };
+
+  if (!isAuthorized) {
+    return (
+      <main className="login-page">
+        <form className="login-card" onSubmit={handleLogin}>
+          <p className="eyebrow">Signal Dashboard</p>
+          <h1>시그널 관리자</h1>
+          <p className="login-desc">
+            관리자 화면에 접속하려면 비밀번호를 입력해주세요.
+          </p>
+
+          <input
+            type="password"
+            value={passwordInput}
+            onChange={(e) => setPasswordInput(e.target.value)}
+            placeholder="비밀번호 입력"
+            autoFocus
+          />
+
+          {passwordError && <p className="login-error">{passwordError}</p>}
+
+          <button type="submit">입장하기</button>
+        </form>
+      </main>
+    );
+  }
+
   const handleServerOff = async () => {
     await postServerAction("/api/finish-signal");
     finishCurrentSignal();
@@ -729,6 +786,14 @@ export default function App() {
                 disabled={serverLoading}
               >
                 포지션 종료
+              </button>
+
+                            <button
+                className="sub-button"
+                onClick={handleLogout}
+                type="button"
+              >
+                잠금
               </button>
             </div>
 

@@ -809,3 +809,72 @@ textarea:focus {
   font-size: 12px;
   font-weight: 900;
 }
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #eef3f8;
+}
+
+.login-card {
+  width: min(420px, 100%);
+  padding: 34px;
+  border-radius: 28px;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
+  border: 1px solid #e6edf5;
+}
+
+.login-card h1 {
+  margin: 6px 0 10px;
+  font-size: 28px;
+  font-weight: 950;
+  color: #0f172a;
+}
+
+.login-desc {
+  margin: 0 0 22px;
+  color: #64748b;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.login-card input {
+  width: 100%;
+  height: 54px;
+  padding: 0 16px;
+  border-radius: 16px;
+  border: 1px solid #d8e2ee;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.login-card input:focus {
+  outline: none;
+  border-color: #172033;
+  background: #ffffff;
+}
+
+.login-card button {
+  width: 100%;
+  height: 54px;
+  margin-top: 16px;
+  border-radius: 16px;
+  background: #172033;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.login-error {
+  margin: 12px 0 0;
+  color: #dc2626;
+  font-size: 13px;
+  font-weight: 800;
+}
