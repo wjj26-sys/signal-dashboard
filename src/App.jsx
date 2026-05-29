@@ -9,6 +9,19 @@ const resultOptions = ["수익 🟢", "손절 🔴", "본절 ⚪", "미진입", 
 const initialSignals = [];
 const initialBlocked = [];
 
+const orderNames = [
+  "첫번째",
+  "두번째",
+  "세번째",
+  "네번째",
+  "다섯번째",
+  "여섯번째",
+  "일곱번째",
+  "여덟번째",
+  "아홉번째",
+  "열번째",
+];
+
 function getTodayText() {
   const now = new Date();
   const year = now.getFullYear();
@@ -34,6 +47,31 @@ function makePositionDraft() {
     { round: "2차", result: "미진입", amount: "" },
     { round: "3차", result: "미진입", amount: "" },
   ];
+}
+
+function makeDefaultPositions() {
+  return [
+    { round: "1차", result: "진행중", amount: "" },
+    { round: "2차", result: "미진입", amount: "" },
+    { round: "3차", result: "미진입", amount: "" },
+  ];
+}
+
+function normalizeServerSignal(item) {
+  const orderText =
+    item.orderText ||
+    `${orderNames[item.order - 1] || `${item.order}번째`} 시그널`;
+
+  return {
+    id: item.id,
+    order: orderText,
+    signal: item.signal || `메시지 #${item.sourceMessageId}`,
+    startTime: item.startedAt || "-",
+    endTime: item.endedAt || (item.status === "종료" ? "-" : "진행중"),
+    result: "확인중",
+    status: item.status || "진행중",
+    positions: makeDefaultPositions(),
+  };
 }
 
 function formatNumber(value) {
@@ -225,7 +263,7 @@ function makeArchiveText(archive) {
 export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [signals, setSignals] = useState(initialSignals);
-  const [blockedSignals] = useState(initialBlocked);
+  const [blockedSignals, setBlockedSignals] = useState(initialBlocked);
 
   const [copied, setCopied] = useState(false);
   const [calcCopied, setCalcCopied] = useState(false);
@@ -360,6 +398,43 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (!serverStatus) return;
+
+    const serverSignals = serverStatus.sentSignals || [];
+    const serverBlockedSignals = serverStatus.blockedSignals || [];
+
+    setSignals((prev) => {
+      const previousMap = new Map(prev.map((item) => [item.id, item]));
+
+      return serverSignals.map((serverItem) => {
+        const normalized = normalizeServerSignal(serverItem);
+        const previous = previousMap.get(serverItem.id);
+
+        return {
+          ...normalized,
+          positions: previous?.positions || normalized.positions,
+          result: previous?.result || normalized.result,
+        };
+      });
+    });
+
+    setBlockedSignals(
+      serverBlockedSignals.map((item) => ({
+        id: item.id,
+        signal: item.signal || `메시지 #${item.messageId}`,
+        time: item.time || "-",
+        reason: item.reason || "미전송",
+      }))
+    );
+
+    if (!selectedSignalId && serverSignals.length > 0) {
+      const latestSignal = serverSignals[serverSignals.length - 1];
+      setSelectedSignalId(String(latestSignal.id));
+      setPositionDraft(makeDefaultPositions());
+    }
+  }, [serverStatus, selectedSignalId]);
+
   const finishCurrentSignal = () => {
     if (!currentSignal) {
       setIsRunning(false);
@@ -467,7 +542,6 @@ export default function App() {
 
   const handleServerOff = async () => {
     await postServerAction("/api/finish-signal");
-    await postServerAction("/api/manual-off");
     finishCurrentSignal();
   };
 
@@ -492,16 +566,16 @@ export default function App() {
 
               {serverActiveSignal ? (
                 <div>
-                  <h2>{serverActiveSignal.order}번째 시그널</h2>
+                  <h2>{serverActiveSignal.orderText || `${serverActiveSignal.order}번째 시그널`}</h2>
 
                   <div className="info-grid">
                     <span>신호</span>
-                    <strong>메시지 #{serverActiveSignal.sourceMessageId}</strong>
+                    <strong>{serverActiveSignal.signal || `메시지 #${serverActiveSignal.sourceMessageId}`}</strong>
 
                     <span>시작 시간</span>
                     <strong>{serverActiveSignal.startedAt || "-"}</strong>
 
-                    <span>결과</span>
+                    <span>상태</span>
                     <strong>{serverActiveSignal.status || "진행중"}</strong>
                   </div>
                 </div>
@@ -537,28 +611,28 @@ export default function App() {
               </div>
 
               <div>
-                <span>봇 상태</span>
-                <strong>{serverStatus?.botEnabled ? "ON" : "OFF"}</strong>
+                <span>전달 상태</span>
+                <strong>{serverStatus?.canReceiveSignal ? "전달 가능" : "잠금"}</strong>
               </div>
 
               <div>
-                <span>운영 시간</span>
-                <strong>{serverStatus?.operatingTime ? "운영중" : "운영 외"}</strong>
+                <span>운영 상태</span>
+                <strong>{serverStatus?.operatingTime ? "상시 운영" : "운영 외"}</strong>
               </div>
 
               <div>
-                <span>진행 상태</span>
+                <span>포지션 상태</span>
                 <strong>{serverStatus?.signalRunning ? "진행중" : "대기중"}</strong>
               </div>
             </div>
 
             <div className="button-row">
               <button
-                className={`main-button ${serverStatus?.botEnabled ? "active" : ""}`}
+                className={`main-button ${serverStatus?.canReceiveSignal ? "active" : ""}`}
                 onClick={handleServerOn}
                 disabled={serverLoading}
               >
-                {serverLoading ? "처리중" : "ON"}
+                {serverLoading ? "처리중" : "전달 가능"}
               </button>
 
               <button
@@ -566,15 +640,15 @@ export default function App() {
                 onClick={handleServerOff}
                 disabled={serverLoading}
               >
-                종료 / OFF
+                포지션 종료
               </button>
             </div>
 
             <div className="rule-box">
               <strong>운영 규칙</strong>
               <p>
-                진행중에는 들어온 신호를 보내지 않고 기록만 남깁니다. 종료 후
-                새로 들어온 첫 신호가 다음 시그널입니다.
+                봇은 항상 ON 상태입니다. 포지션 진행중에는 새 이미지 신호를 보내지 않고 기록만 남깁니다.
+                포지션 종료 후 새로 들어온 첫 이미지 신호가 다음 시그널입니다.
               </p>
             </div>
           </div>
