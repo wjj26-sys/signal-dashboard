@@ -71,6 +71,10 @@ function toDateText(date) {
   return `${year}-${month}-${day}`;
 }
 
+function getTodayLogDate() {
+  return toDateText(getKstNow());
+}
+
 function getWeekKey(dateText) {
   const date = new Date(`${dateText}T00:00:00`);
   const day = date.getDay();
@@ -142,6 +146,7 @@ function mapSentLog(row) {
     endedAt: row.ended_at,
     status: row.status || "진행중",
     text: row.message_text || "",
+    logDate: row.log_date,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -156,6 +161,7 @@ function mapBlockedLog(row) {
     time: row.started_at,
     reason: row.reason || "미전송",
     text: row.message_text || "",
+    logDate: row.log_date,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -164,9 +170,12 @@ function mapBlockedLog(row) {
 async function syncSignalLogsFromDb() {
   if (!supabase) return;
 
+  const today = getTodayLogDate();
+
   const { data, error } = await supabase
     .from("signal_logs")
     .select("*")
+    .eq("log_date", today)
     .order("created_at", { ascending: true });
 
   if (error) throw error;
@@ -189,8 +198,10 @@ async function syncSignalLogsFromDb() {
 }
 
 async function createSentSignalLog(payload) {
+  const today = getTodayLogDate();
+
   if (!supabase) {
-    sentSignals.push(payload);
+    sentSignals.push({ ...payload, logDate: today });
     activeSignal = payload;
     signalRunning = true;
     return payload;
@@ -199,6 +210,7 @@ async function createSentSignalLog(payload) {
   const { data, error } = await supabase
     .from("signal_logs")
     .insert({
+      log_date: today,
       log_type: "sent",
       signal_order: payload.order,
       order_text: payload.orderText,
@@ -224,14 +236,17 @@ async function createSentSignalLog(payload) {
 }
 
 async function createBlockedSignalLog(payload) {
+  const today = getTodayLogDate();
+
   if (!supabase) {
-    blockedSignals.push(payload);
+    blockedSignals.push({ ...payload, logDate: today });
     return payload;
   }
 
   const { data, error } = await supabase
     .from("signal_logs")
     .insert({
+      log_date: today,
       log_type: "blocked",
       signal_order: null,
       order_text: null,
@@ -260,9 +275,7 @@ async function createBlockedSignalLog(payload) {
 async function finishActiveSignalLog() {
   const endedAt = getTimeText();
 
-  if (!activeSignal) {
-    await syncSignalLogsFromDb();
-  }
+  await syncSignalLogsFromDb();
 
   if (!activeSignal) {
     signalRunning = false;
@@ -276,7 +289,8 @@ async function finishActiveSignalLog() {
         status: "종료",
         ended_at: endedAt,
       })
-      .eq("id", activeSignal.id);
+      .eq("id", activeSignal.id)
+      .eq("log_date", getTodayLogDate());
 
     if (error) throw error;
 
@@ -504,6 +518,7 @@ app.get("/api/status", async (req, res) => {
       sentSignals,
       blockedSignals,
       supabaseConnected: Boolean(supabase),
+      logDate: getTodayLogDate(),
     });
   } catch (error) {
     res.status(500).json({
@@ -586,6 +601,8 @@ app.post("/api/finish-signal", async (req, res) => {
 
 app.post("/api/lock-position", async (req, res) => {
   try {
+    await syncSignalLogsFromDb();
+
     botEnabled = true;
     signalRunning = true;
 
