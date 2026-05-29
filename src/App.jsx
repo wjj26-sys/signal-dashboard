@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const API_BASE_URL = "https://signal-telegram-server.onrender.com";
-const STORAGE_KEY = "signal-position-archives-v2";
 
 const resultOptions = ["수익 🟢", "손절 🔴", "본절 ⚪", "미진입", "진행중"];
 
@@ -184,70 +183,6 @@ function formatShortRange(startDate, endDate) {
   return `${formatShortDate(startDate)} ~ ${formatShortDate(endDate)}`;
 }
 
-function enrichArchive(group) {
-  const records = [...group.records].sort((a, b) =>
-    a.date.localeCompare(b.date)
-  );
-  const startDate = records[0]?.date || "";
-  const endDate = records[records.length - 1]?.date || "";
-  const updatedAt = records.reduce(
-    (latest, record) => (record.updatedAt > latest ? record.updatedAt : latest),
-    ""
-  );
-
-  return { ...group, records, startDate, endDate, updatedAt };
-}
-
-function loadArchives() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) return [];
-
-    const parsed = JSON.parse(raw);
-
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .map(enrichArchive)
-      .sort((a, b) => b.weekKey.localeCompare(a.weekKey))
-      .slice(0, 2);
-  } catch (error) {
-    return [];
-  }
-}
-
-function upsertArchive(prevArchives, dailyRecord) {
-  const weekKey = getWeekKey(dailyRecord.date);
-
-  const archiveMap = new Map(
-    prevArchives.map((archive) => [
-      archive.weekKey,
-      { ...archive, records: [...archive.records] },
-    ])
-  );
-
-  const target = archiveMap.get(weekKey) || { weekKey, records: [] };
-
-  const recordIndex = target.records.findIndex(
-    (record) =>
-      record.date === dailyRecord.date && record.symbol === dailyRecord.symbol
-  );
-
-  if (recordIndex >= 0) {
-    target.records[recordIndex] = dailyRecord;
-  } else {
-    target.records.push(dailyRecord);
-  }
-
-  archiveMap.set(weekKey, target);
-
-  return Array.from(archiveMap.values())
-    .map(enrichArchive)
-    .sort((a, b) => b.weekKey.localeCompare(a.weekKey))
-    .slice(0, 2);
-}
-
 function makeArchiveText(archive) {
   if (!archive) return "저장된 포지션 기록이 없습니다.";
 
@@ -283,8 +218,9 @@ export default function App() {
   const [selectedSignalId, setSelectedSignalId] = useState("");
   const [positionDraft, setPositionDraft] = useState(() => makePositionDraft());
 
-  const [archives, setArchives] = useState(() => loadArchives());
+  const [archives, setArchives] = useState([]);
   const [selectedArchiveKey, setSelectedArchiveKey] = useState("");
+  const [archiveLoading, setArchiveLoading] = useState(false);
 
   const currentSignal = signals.find((item) => item.status === "진행중");
   const selectedSignal = signals.find(
@@ -337,6 +273,26 @@ export default function App() {
     } catch (error) {
       console.error("서버 상태 불러오기 실패:", error);
       setServerStatus(null);
+    }
+  };
+
+  const fetchPositionRecords = async () => {
+    try {
+      setArchiveLoading(true);
+
+      const response = await fetch(`${API_BASE_URL}/api/position-records`);
+      const data = await response.json();
+
+      if (!data.ok) {
+        console.error("포지션 기록 불러오기 실패:", data.error);
+        return;
+      }
+
+      setArchives(data.archives || []);
+    } catch (error) {
+      console.error("포지션 기록 불러오기 오류:", error);
+    } finally {
+      setArchiveLoading(false);
     }
   };
 
@@ -409,7 +365,7 @@ export default function App() {
     );
   };
 
-  const deleteSelectedArchive = () => {
+  const deleteSelectedArchive = async () => {
     if (!selectedArchive) {
       alert("삭제할 주간 정리본이 없습니다.");
       return;
@@ -421,19 +377,46 @@ export default function App() {
 
     if (!ok) return;
 
-    setArchives((prev) =>
-      prev.filter((archive) => archive.weekKey !== selectedArchive.weekKey)
-    );
+    try {
+      setArchiveLoading(true);
 
-    setSelectedArchiveKey("");
+      const response = await fetch(
+        `${API_BASE_URL}/api/position-records/week/${encodeURIComponent(
+          selectedArchive.weekKey
+        )}`,
+        {
+          method: "DELETE",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!data.ok) {
+        alert(data.error || "주간 정리본 삭제에 실패했어요.");
+        return;
+      }
+
+      setArchives(data.archives || []);
+      setSelectedArchiveKey("");
+    } catch (error) {
+      alert("주간 정리본 삭제 중 오류가 발생했어요.");
+      console.error(error);
+    } finally {
+      setArchiveLoading(false);
+    }
   };
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(archives));
-  }, [archives]);
+    if (archives.length === 0) {
+      setSelectedArchiveKey("");
+      return;
+    }
 
-  useEffect(() => {
-    if (!selectedArchiveKey && archives[0]) {
+    const selectedExists = archives.some(
+      (archive) => archive.weekKey === selectedArchiveKey
+    );
+
+    if (!selectedArchiveKey || !selectedExists) {
       setSelectedArchiveKey(archives[0].weekKey);
     }
   }, [archives, selectedArchiveKey]);
@@ -459,6 +442,16 @@ export default function App() {
     const timer = setInterval(() => {
       fetchServerStatus();
     }, 5000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    fetchPositionRecords();
+
+    const timer = setInterval(() => {
+      fetchPositionRecords();
+    }, 10000);
 
     return () => clearInterval(timer);
   }, []);
@@ -594,25 +587,44 @@ export default function App() {
     );
   };
 
-  const savePositionRecord = () => {
+  const savePositionRecord = async () => {
     if (!positionText.trim()) {
       alert("저장할 포지션 기록이 없습니다.");
       return;
     }
 
-    const dailyRecord = {
-      date: tradeDate,
-      symbol: tradeSymbol,
-      text: positionText,
-      updatedAt: new Date().toISOString(),
-    };
+    try {
+      setSaved(true);
 
-    const targetWeekKey = getWeekKey(tradeDate);
+      const response = await fetch(`${API_BASE_URL}/api/position-records`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          date: tradeDate,
+          symbol: tradeSymbol,
+          text: positionText,
+        }),
+      });
 
-    setArchives((prev) => upsertArchive(prev, dailyRecord));
-    setSelectedArchiveKey(targetWeekKey);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1500);
+      const data = await response.json();
+
+      if (!data.ok) {
+        alert(data.error || "포지션 기록 저장에 실패했어요.");
+        setSaved(false);
+        return;
+      }
+
+      setArchives(data.archives || []);
+      setSelectedArchiveKey(getWeekKey(tradeDate));
+
+      setTimeout(() => setSaved(false), 1500);
+    } catch (error) {
+      alert("포지션 기록 저장 중 오류가 발생했어요.");
+      console.error(error);
+      setSaved(false);
+    }
   };
 
   const handleServerOn = async () => {
@@ -991,7 +1003,11 @@ export default function App() {
               <div className="section-title">포지션 기록기</div>
 
               <div className="record-actions">
-                <button className="copy-button" onClick={savePositionRecord}>
+                <button
+                  className="copy-button"
+                  onClick={savePositionRecord}
+                  disabled={archiveLoading}
+                >
                   {saved ? "저장완료" : "저장"}
                 </button>
 
@@ -1020,7 +1036,11 @@ export default function App() {
 
               <div className="archive-week-list">
                 {archives.length === 0 ? (
-                  <div className="empty-box">아직 저장된 기록이 없습니다.</div>
+                  <div className="empty-box">
+                    {archiveLoading
+                      ? "기록을 불러오는 중입니다."
+                      : "아직 저장된 기록이 없습니다."}
+                  </div>
                 ) : (
                   archives.map((archive) => (
                     <button
@@ -1046,7 +1066,7 @@ export default function App() {
                   <button
                     className="delete-mini-button"
                     onClick={deleteSelectedArchive}
-                    disabled={!selectedArchive}
+                    disabled={!selectedArchive || archiveLoading}
                   >
                     삭제
                   </button>
