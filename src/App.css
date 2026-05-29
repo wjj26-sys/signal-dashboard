@@ -892,3 +892,47 @@ textarea:focus {
   line-height: 1.5;
   word-break: keep-all;
 }
+
+.blocked-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 78px;
+}
+
+.blocked-item > div:first-child {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.blocked-item p {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 850;
+  color: #64748b;
+  line-height: 1.4;
+  word-break: keep-all;
+}
+
+.blocked-actions {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  align-items: center;
+  justify-items: end;
+  height: 100%;
+  min-height: 58px;
+}
+
+.blocked-actions span {
+  align-self: start;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 950;
+  line-height: 30px;
+}
+
+.blocked-actions .delete-mini-button {
+  align-self: end;
+}
