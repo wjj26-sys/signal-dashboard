@@ -65,10 +65,9 @@ function normalizeServerSignal(item) {
   return {
     id: item.id,
     order: orderText,
-    signal: item.signal || `메시지 #${item.sourceMessageId}`,
     startTime: item.startedAt || "-",
     endTime: item.endedAt || (item.status === "종료" ? "-" : "진행중"),
-    result: "확인중",
+    result: item.status === "종료" ? "결과 입력 필요" : "확인중",
     status: item.status || "진행중",
     positions: makeDefaultPositions(),
   };
@@ -363,6 +362,53 @@ export default function App() {
     }
   };
 
+  const deleteServerItem = async (path, message) => {
+    const ok = window.confirm(message);
+
+    if (!ok) return;
+
+    try {
+      setServerLoading(true);
+
+      const response = await fetch(`${API_BASE_URL}${path}`, {
+        method: "DELETE",
+      });
+
+      const data = await response.json();
+
+      if (!data.ok) {
+        alert(data.error || "삭제에 실패했어요.");
+        return;
+      }
+
+      await fetchServerStatus();
+    } catch (error) {
+      alert("삭제 중 오류가 발생했어요. 서버 연결을 확인해주세요!");
+      console.error(error);
+    } finally {
+      setServerLoading(false);
+    }
+  };
+
+  const deleteSentSignal = async (id) => {
+    await deleteServerItem(
+      `/api/sent-signals/${id}`,
+      "이 전송된 시그널을 삭제할까요?"
+    );
+
+    if (String(selectedSignalId) === String(id)) {
+      setSelectedSignalId("");
+      setPositionDraft(makePositionDraft());
+    }
+  };
+
+  const deleteBlockedSignal = async (id) => {
+    await deleteServerItem(
+      `/api/blocked-signals/${id}`,
+      "이 미전송 기록을 삭제할까요?"
+    );
+  };
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(archives));
   }, [archives]);
@@ -422,16 +468,30 @@ export default function App() {
     setBlockedSignals(
       serverBlockedSignals.map((item) => ({
         id: item.id,
-        signal: item.signal || `메시지 #${item.messageId}`,
         time: item.time || "-",
         reason: item.reason || "미전송",
       }))
+    );
+
+    const selectedExists = serverSignals.some(
+      (item) => String(item.id) === String(selectedSignalId)
     );
 
     if (!selectedSignalId && serverSignals.length > 0) {
       const latestSignal = serverSignals[serverSignals.length - 1];
       setSelectedSignalId(String(latestSignal.id));
       setPositionDraft(makeDefaultPositions());
+    }
+
+    if (selectedSignalId && !selectedExists) {
+      if (serverSignals.length > 0) {
+        const latestSignal = serverSignals[serverSignals.length - 1];
+        setSelectedSignalId(String(latestSignal.id));
+        setPositionDraft(makeDefaultPositions());
+      } else {
+        setSelectedSignalId("");
+        setPositionDraft(makePositionDraft());
+      }
     }
   }, [serverStatus, selectedSignalId]);
 
@@ -566,12 +626,12 @@ export default function App() {
 
               {serverActiveSignal ? (
                 <div>
-                  <h2>{serverActiveSignal.orderText || `${serverActiveSignal.order}번째 시그널`}</h2>
+                  <h2>
+                    {serverActiveSignal.orderText ||
+                      `${serverActiveSignal.order}번째 시그널`}
+                  </h2>
 
                   <div className="info-grid">
-                    <span>신호</span>
-                    <strong>{serverActiveSignal.signal || `메시지 #${serverActiveSignal.sourceMessageId}`}</strong>
-
                     <span>시작 시간</span>
                     <strong>{serverActiveSignal.startedAt || "-"}</strong>
 
@@ -584,9 +644,6 @@ export default function App() {
                   <h2>{currentSignal.order}</h2>
 
                   <div className="info-grid">
-                    <span>신호</span>
-                    <strong>{currentSignal.signal}</strong>
-
                     <span>시작 시간</span>
                     <strong>{currentSignal.startTime}</strong>
 
@@ -647,8 +704,8 @@ export default function App() {
             <div className="rule-box">
               <strong>운영 규칙</strong>
               <p>
-                봇은 항상 ON 상태입니다. 포지션 진행중에는 새 이미지 신호를 보내지 않고 기록만 남깁니다.
-                포지션 종료 후 새로 들어온 첫 이미지 신호가 다음 시그널입니다.
+                봇은 항상 ON 상태입니다. 포지션 진행중에는 새 이미지 신호를 보내지 않고
+                기록만 남깁니다. 포지션 종료 후 새로 들어온 첫 이미지 신호가 다음 시그널입니다.
               </p>
             </div>
           </div>
@@ -663,11 +720,20 @@ export default function App() {
                 blockedSignals.map((item) => (
                   <div className="blocked-item" key={item.id}>
                     <div>
-                      <strong>{item.signal}</strong>
+                      <strong>{item.id}번</strong>
                       <p>{item.reason}</p>
                     </div>
 
-                    <span>{item.time}</span>
+                    <div className="blocked-actions">
+                      <span>{item.time}</span>
+                      <button
+                        className="delete-mini-button"
+                        onClick={() => deleteBlockedSignal(item.id)}
+                        disabled={serverLoading}
+                      >
+                        삭제
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
@@ -788,7 +854,7 @@ export default function App() {
                 ) : (
                   signals.map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.order} / {item.signal}
+                      {item.order}
                     </option>
                   ))
                 )}
@@ -833,7 +899,7 @@ export default function App() {
 
             {selectedSignal ? (
               <p className="muted-note selected-note">
-                현재 선택: {selectedSignal.order} / {selectedSignal.signal}
+                현재 선택: {selectedSignal.order}
               </p>
             ) : (
               <p className="muted-note selected-note">
@@ -848,16 +914,16 @@ export default function App() {
               <span className="count-pill">총 {signals.length}개</span>
             </div>
 
-            <div className="table-wrap">
-              <table>
+            <div className="table-wrap signal-table-wrap">
+              <table className="signal-table">
                 <thead>
                   <tr>
                     <th>순서</th>
-                    <th>신호</th>
                     <th>시작</th>
                     <th>종료</th>
                     <th>결과</th>
                     <th>상태</th>
+                    <th>관리</th>
                   </tr>
                 </thead>
 
@@ -872,7 +938,6 @@ export default function App() {
                     signals.map((item) => (
                       <tr key={item.id}>
                         <td>{item.order}</td>
-                        <td>{item.signal}</td>
                         <td>{item.startTime}</td>
                         <td>{item.endTime}</td>
                         <td>{item.result}</td>
@@ -884,6 +949,15 @@ export default function App() {
                           >
                             {item.status}
                           </span>
+                        </td>
+                        <td>
+                          <button
+                            className="delete-mini-button"
+                            onClick={() => deleteSentSignal(item.id)}
+                            disabled={serverLoading}
+                          >
+                            삭제
+                          </button>
                         </td>
                       </tr>
                     ))

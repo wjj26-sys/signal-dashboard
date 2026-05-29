@@ -658,3 +658,154 @@ textarea:focus {
   font-weight: 800;
   text-align: center;
 }
+
+.table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.table-wrap th,
+.table-wrap td {
+  padding: 16px 12px;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.table-wrap th {
+  font-size: 13px;
+  font-weight: 800;
+  color: #64748b;
+}
+
+.table-wrap td {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.signal-card .table-wrap {
+  overflow-x: auto;
+}
+
+.signal-card table th:first-child,
+.signal-card table td:first-child {
+  min-width: 120px;
+}
+
+.signal-card table th:nth-child(2),
+.signal-card table td:nth-child(2),
+.signal-card table th:nth-child(3),
+.signal-card table td:nth-child(3) {
+  min-width: 90px;
+}
+
+.signal-card table th:nth-child(4),
+.signal-card table td:nth-child(4) {
+  min-width: 140px;
+}
+
+.signal-card table th:nth-child(5),
+.signal-card table td:nth-child(5) {
+  min-width: 100px;
+}
+
+.empty-table-cell {
+  padding: 24px 13px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.signal-table-wrap {
+  overflow-x: auto;
+}
+
+.signal-table {
+  width: 100%;
+  min-width: 680px;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+.signal-table th,
+.signal-table td {
+  padding: 16px 12px;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.signal-table th {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.signal-table td {
+  color: #172033;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.signal-table th:nth-child(1),
+.signal-table td:nth-child(1) {
+  width: 150px;
+}
+
+.signal-table th:nth-child(2),
+.signal-table td:nth-child(2),
+.signal-table th:nth-child(3),
+.signal-table td:nth-child(3) {
+  width: 90px;
+}
+
+.signal-table th:nth-child(4),
+.signal-table td:nth-child(4) {
+  width: 140px;
+}
+
+.signal-table th:nth-child(5),
+.signal-table td:nth-child(5) {
+  width: 100px;
+}
+
+.signal-table th:nth-child(6),
+.signal-table td:nth-child(6) {
+  width: 90px;
+}
+
+.delete-mini-button {
+  min-width: 52px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.delete-mini-button:hover {
+  background: #fecaca;
+}
+
+.delete-mini-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.blocked-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.blocked-actions span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 900;
+}
