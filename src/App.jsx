@@ -197,11 +197,12 @@ function makeArchiveText(archive) {
 }
 
 export default function App() {
-    const [passwordInput, setPasswordInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
   const [isAuthorized, setIsAuthorized] = useState(() => {
     return localStorage.getItem(AUTH_STORAGE_KEY) === "true";
   });
   const [passwordError, setPasswordError] = useState("");
+
   const [isRunning, setIsRunning] = useState(false);
   const [signals, setSignals] = useState(initialSignals);
   const [blockedSignals, setBlockedSignals] = useState(initialBlocked);
@@ -240,6 +241,7 @@ export default function App() {
 
   const serverActiveSignal = serverStatus?.activeSignal;
   const isSignalRunning = Boolean(serverStatus?.signalRunning || isRunning);
+  const isUiLocked = serverStatus?.botEnabled === false;
 
   const positionText = useMemo(
     () => makePositionText(signals, tradeDate, tradeSymbol),
@@ -470,11 +472,11 @@ export default function App() {
     const serverBlockedSignals = serverStatus.blockedSignals || [];
 
     setSignals((prev) => {
-      const previousMap = new Map(prev.map((item) => [item.id, item]));
+      const previousMap = new Map(prev.map((item) => [String(item.id), item]));
 
       return serverSignals.map((serverItem) => {
         const normalized = normalizeServerSignal(serverItem);
-        const previous = previousMap.get(serverItem.id);
+        const previous = previousMap.get(String(serverItem.id));
 
         return {
           ...normalized,
@@ -524,7 +526,7 @@ export default function App() {
 
     setSignals((prev) =>
       prev.map((item) =>
-        item.id === currentSignal.id
+        String(item.id) === String(currentSignal.id)
           ? {
               ...item,
               endTime,
@@ -572,6 +574,8 @@ export default function App() {
   };
 
   const applyPositionRecord = () => {
+    if (isUiLocked) return;
+
     if (!selectedSignalId) {
       alert("아직 기록 적용할 시그널이 없습니다.");
       return;
@@ -595,6 +599,8 @@ export default function App() {
   };
 
   const savePositionRecord = async () => {
+    if (isUiLocked) return;
+
     if (!positionText.trim()) {
       alert("저장할 포지션 기록이 없습니다.");
       return;
@@ -638,6 +644,36 @@ export default function App() {
     await postServerAction("/api/manual-on");
   };
 
+  const handleServerOff = async () => {
+    await postServerAction("/api/finish-signal");
+    finishCurrentSignal();
+  };
+
+  const checkAdminPassword = () => {
+    const input = window.prompt("관리자 비밀번호를 입력해주세요.");
+
+    if (input === null) return false;
+
+    if (input !== ADMIN_PASSWORD) {
+      alert("비밀번호가 맞지 않습니다.");
+      return false;
+    }
+
+    return true;
+  };
+
+  const handleLockDashboard = async () => {
+    if (!checkAdminPassword()) return;
+
+    await postServerAction("/api/manual-off");
+  };
+
+  const handleUnlockDashboard = async () => {
+    if (!checkAdminPassword()) return;
+
+    await postServerAction("/api/manual-on");
+  };
+
   const handleLogin = (event) => {
     event.preventDefault();
 
@@ -654,12 +690,6 @@ export default function App() {
     }
 
     setPasswordError("비밀번호가 맞지 않습니다.");
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem(AUTH_STORAGE_KEY);
-    setIsAuthorized(false);
-    setPasswordInput("");
   };
 
   if (!isAuthorized) {
@@ -688,11 +718,6 @@ export default function App() {
     );
   }
 
-  const handleServerOff = async () => {
-    await postServerAction("/api/finish-signal");
-    finishCurrentSignal();
-  };
-
   return (
     <main className="page">
       <section className="dashboard">
@@ -704,15 +729,26 @@ export default function App() {
                 <h1>미니 관리자</h1>
               </div>
 
-              <span className={`status-pill ${isSignalRunning ? "running" : "waiting"}`}>
-                {isSignalRunning ? "진행중" : "대기중"}
+              <span
+                className={`status-pill ${
+                  isUiLocked ? "locked" : isSignalRunning ? "running" : "waiting"
+                }`}
+              >
+                {isUiLocked ? "잠금중" : isSignalRunning ? "진행중" : "대기중"}
               </span>
             </div>
 
             <div className="current-box">
               <p className="box-title">현재 상태</p>
 
-              {serverActiveSignal ? (
+              {isUiLocked ? (
+                <div>
+                  <h2>관리자 잠금중</h2>
+                  <p className="desc">
+                    봇이 OFF 상태입니다. 잠금 해제 후 다음 신호를 받을 수 있습니다.
+                  </p>
+                </div>
+              ) : serverActiveSignal ? (
                 <div>
                   <h2>
                     {serverActiveSignal.orderText ||
@@ -757,7 +793,13 @@ export default function App() {
 
               <div>
                 <span>전달 상태</span>
-                <strong>{serverStatus?.canReceiveSignal ? "전달 가능" : "잠금"}</strong>
+                <strong>
+                  {isUiLocked
+                    ? "잠금중"
+                    : serverStatus?.canReceiveSignal
+                    ? "전달 가능"
+                    : "잠금"}
+                </strong>
               </div>
 
               <div>
@@ -773,9 +815,9 @@ export default function App() {
 
             <div className="button-row">
               <button
-                className={`main-button ${serverStatus?.canReceiveSignal ? "active" : ""}`}
+                className={`main-button ${serverStatus?.canReceiveSignal && !isUiLocked ? "active" : ""}`}
                 onClick={handleServerOn}
-                disabled={serverLoading}
+                disabled={serverLoading || isUiLocked}
               >
                 {serverLoading ? "처리중" : "전달 가능"}
               </button>
@@ -783,30 +825,32 @@ export default function App() {
               <button
                 className="sub-button"
                 onClick={handleServerOff}
-                disabled={serverLoading}
+                disabled={serverLoading || isUiLocked}
               >
                 포지션 종료
               </button>
 
-                            <button
-                className="sub-button"
-                onClick={handleLogout}
-                type="button"
+              <button
+                className={isUiLocked ? "main-button active" : "sub-button"}
+                onClick={isUiLocked ? handleUnlockDashboard : handleLockDashboard}
+                disabled={serverLoading}
               >
-                잠금
+                {isUiLocked ? "잠금 해제" : "잠금"}
               </button>
             </div>
 
             <div className="rule-box">
               <strong>운영 규칙</strong>
               <p>
-                봇은 항상 ON 상태입니다. 포지션 진행중에는 새 이미지 신호를 보내지 않고
-                기록만 남깁니다. 포지션 종료 후 새로 들어온 첫 이미지 신호가 다음 시그널입니다.
+                봇은 기본적으로 ON 상태입니다. 잠금 시 봇이 OFF되고, 화면 일부 조작이 제한됩니다.
+                잠금 해제 시 자동으로 전달 가능 상태가 됩니다.
               </p>
             </div>
           </div>
 
-          <div className="card blocked-card">
+          <div className={`card blocked-card lockable-card ${isUiLocked ? "is-locked" : ""}`}>
+            {isUiLocked && <div className="lock-overlay">잠금중</div>}
+
             <div className="section-title">미전송 기록</div>
 
             <div className="blocked-list">
@@ -824,7 +868,7 @@ export default function App() {
                       <button
                         className="delete-mini-button"
                         onClick={() => deleteBlockedSignal(item.id)}
-                        disabled={serverLoading}
+                        disabled={serverLoading || isUiLocked}
                       >
                         삭제
                       </button>
@@ -837,7 +881,9 @@ export default function App() {
         </aside>
 
         <section className="right-panel">
-          <div className="card form-card calc-card">
+          <div className={`card form-card calc-card lockable-card ${isUiLocked ? "is-locked" : ""}`}>
+            {isUiLocked && <div className="lock-overlay">잠금중</div>}
+
             <div className="table-header">
               <div className="section-title">진입가 계산기</div>
 
@@ -933,7 +979,9 @@ export default function App() {
             </p>
           </div>
 
-          <div className="card form-card position-card">
+          <div className={`card form-card position-card lockable-card ${isUiLocked ? "is-locked" : ""}`}>
+            {isUiLocked && <div className="lock-overlay">잠금중</div>}
+
             <div className="section-title">포지션 선택 패널</div>
 
             <p className="muted-note">
@@ -1003,7 +1051,9 @@ export default function App() {
             )}
           </div>
 
-          <div className="card signal-card">
+          <div className={`card signal-card lockable-card ${isUiLocked ? "is-locked" : ""}`}>
+            {isUiLocked && <div className="lock-overlay">잠금중</div>}
+
             <div className="table-header">
               <div className="section-title">전송된 시그널</div>
               <span className="count-pill">총 {signals.length}개</span>
@@ -1049,7 +1099,7 @@ export default function App() {
                           <button
                             className="delete-mini-button"
                             onClick={() => deleteSentSignal(item.id)}
-                            disabled={serverLoading}
+                            disabled={serverLoading || isUiLocked}
                           >
                             삭제
                           </button>
@@ -1070,9 +1120,9 @@ export default function App() {
                 <button
                   className="copy-button"
                   onClick={savePositionRecord}
-                  disabled={archiveLoading}
+                  disabled={archiveLoading || isUiLocked}
                 >
-                  {saved ? "저장완료" : "저장"}
+                  {isUiLocked ? "잠금중" : saved ? "저장완료" : "저장"}
                 </button>
 
                 <button
@@ -1130,7 +1180,7 @@ export default function App() {
                   <button
                     className="delete-mini-button"
                     onClick={deleteSelectedArchive}
-                    disabled={!selectedArchive || archiveLoading}
+                    disabled={!selectedArchive || archiveLoading || isUiLocked}
                   >
                     삭제
                   </button>

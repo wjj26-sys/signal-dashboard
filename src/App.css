@@ -936,3 +936,43 @@ textarea:focus {
 .blocked-actions .delete-mini-button {
   align-self: end;
 }
+
+.status-pill.locked {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.lockable-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.lockable-card.is-locked > *:not(.lock-overlay) {
+  opacity: 0.32;
+  filter: grayscale(1);
+  pointer-events: none;
+  user-select: none;
+}
+
+.lock-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(226, 232, 240, 0.72);
+  backdrop-filter: blur(2px);
+  color: #172033;
+  font-size: 20px;
+  font-weight: 950;
+  letter-spacing: -0.04em;
+}
+
+.copy-button:disabled,
+.apply-button:disabled,
+.main-button:disabled,
+.sub-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

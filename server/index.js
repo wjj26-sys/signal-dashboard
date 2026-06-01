@@ -559,16 +559,28 @@ app.post("/api/manual-on", async (req, res) => {
   }
 });
 
-app.post("/api/manual-off", (req, res) => {
-  botEnabled = true;
+app.post("/api/manual-off", async (req, res) => {
+  try {
+    await syncSignalLogsFromDb();
 
-  res.json({
-    ok: true,
-    message: "봇은 계속 ON 상태입니다. 포지션 종료는 /api/finish-signal에서 처리됩니다.",
-    botEnabled,
-    signalRunning,
-    canReceiveSignal: botEnabled && !signalRunning,
-  });
+    botEnabled = false;
+
+    res.json({
+      ok: true,
+      message: "관리자 잠금 상태입니다. 봇이 OFF되었습니다.",
+      botEnabled,
+      signalRunning,
+      canReceiveSignal: false,
+      activeSignal,
+      sentSignals,
+      blockedSignals,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
 });
 
 app.post("/api/finish-signal", async (req, res) => {
