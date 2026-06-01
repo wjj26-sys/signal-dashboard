@@ -214,6 +214,70 @@ async function syncSignalLogsFromDb() {
   signalRunning = Boolean(activeSignal);
 }
 
+async function releaseTodaySignalLock() {
+  if (!supabase) return;
+
+  const { error } = await supabase
+    .from("signal_locks")
+    .delete()
+    .eq("lock_date", getTodayLogDate());
+
+  if (error) throw error;
+}
+
+async function acquireTodaySignalLock(payload) {
+  const today = getTodayLogDate();
+
+  if (!supabase) {
+    return {
+      ok: !signalRunning,
+      reason: signalRunning ? "진행중 유입으로 미전송" : "",
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("signal_locks")
+    .insert({
+      lock_date: today,
+      source_room: payload.sourceRoom || "",
+      source_chat_id: payload.sourceChatId,
+      source_message_id: payload.sourceMessageId,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    // 23505 = unique constraint violation
+    // 오늘 날짜 lock_date가 이미 있으면 이미 다른 신호가 선점한 상태입니다.
+    if (error.code === "23505") {
+      return {
+        ok: false,
+        reason: "진행중 유입으로 미전송",
+      };
+    }
+
+    throw error;
+  }
+
+  return {
+    ok: true,
+    lock: data,
+  };
+}
+
+async function attachSignalLogToLock(signalLogId) {
+  if (!supabase || !signalLogId) return;
+
+  const { error } = await supabase
+    .from("signal_locks")
+    .update({
+      signal_log_id: signalLogId,
+    })
+    .eq("lock_date", getTodayLogDate());
+
+  if (error) throw error;
+}
+
 async function createSentSignalLog(payload) {
   const today = getTodayLogDate();
 
@@ -298,6 +362,7 @@ async function finishActiveSignalLog() {
 
   if (!activeSignal) {
     signalRunning = false;
+    await releaseTodaySignalLock();
     return null;
   }
 
@@ -312,6 +377,8 @@ async function finishActiveSignalLog() {
       .eq("log_date", getTodayLogDate());
 
     if (error) throw error;
+
+    await releaseTodaySignalLock();
 
     await syncSignalLogsFromDb();
     return activeSignal;
@@ -488,38 +555,60 @@ async function handleSignalMessage(message) {
     return;
   }
 
-  const maxOrder = sentSignals.reduce(
-    (max, item) => Math.max(max, Number(item.order) || 0),
-    0
-  );
-
-  const order = maxOrder + 1;
-  const startedAt = getTimeText();
-  const direction = getSignalDirection(message);
-
-  const forwarded = await forwardMessageToTarget(message);
-
-  const newSignal = {
-    id: order,
-    order,
-    orderText: `${orderNames[order - 1] || `${order}번째`} 시그널`,
+  const lockResult = await acquireTodaySignalLock({
     sourceRoom,
-    signal: direction,
-    sourceMessageId: message.message_id,
-    forwardedMessageId: forwarded.message_id,
     sourceChatId: message.chat.id,
-    startedAt,
-    endedAt: null,
-    status: "진행중",
-    text: getMessageText(message),
-  };
+    sourceMessageId: message.message_id,
+  });
 
-  const savedSignal = await createSentSignalLog(newSignal);
+  if (!lockResult.ok) {
+    await addBlockedSignal(
+      message,
+      lockResult.reason || "진행중 유입으로 미전송",
+      sourceRoom
+    );
+    return;
+  }
 
-  signalRunning = true;
-  activeSignal = savedSignal;
+  try {
+    const maxOrder = sentSignals.reduce(
+      (max, item) => Math.max(max, Number(item.order) || 0),
+      0
+    );
 
-  console.log("신호 전달 완료:", savedSignal);
+    const order = maxOrder + 1;
+    const startedAt = getTimeText();
+    const direction = getSignalDirection(message);
+
+    const forwarded = await forwardMessageToTarget(message);
+
+    const newSignal = {
+      id: order,
+      order,
+      orderText: `${orderNames[order - 1] || `${order}번째`} 시그널`,
+      sourceRoom,
+      signal: direction,
+      sourceMessageId: message.message_id,
+      forwardedMessageId: forwarded.message_id,
+      sourceChatId: message.chat.id,
+      startedAt,
+      endedAt: null,
+      status: "진행중",
+      text: getMessageText(message),
+    };
+
+    const savedSignal = await createSentSignalLog(newSignal);
+
+    await attachSignalLogToLock(savedSignal.id);
+
+    signalRunning = true;
+    activeSignal = savedSignal;
+
+    console.log("신호 전달 완료:", savedSignal);
+  } catch (error) {
+    await releaseTodaySignalLock();
+    throw error;
+  }
 }
 
 app.get("/", (req, res) => {
@@ -560,6 +649,8 @@ app.post("/api/manual-on", async (req, res) => {
 
     if (activeSignal) {
       await finishActiveSignalLog();
+    } else {
+      await releaseTodaySignalLock();
     }
 
     botEnabled = true;
@@ -688,6 +779,9 @@ app.delete("/api/sent-signals/:id", async (req, res) => {
     const id = req.params.id;
 
     if (supabase) {
+      const deletingActiveSignal =
+        activeSignal && String(activeSignal.id) === String(id);
+
       const { error } = await supabase
         .from("signal_logs")
         .delete()
@@ -695,6 +789,17 @@ app.delete("/api/sent-signals/:id", async (req, res) => {
         .eq("log_type", "sent");
 
       if (error) throw error;
+
+      const { error: lockDeleteByLogError } = await supabase
+        .from("signal_locks")
+        .delete()
+        .eq("signal_log_id", id);
+
+      if (lockDeleteByLogError) throw lockDeleteByLogError;
+
+      if (deletingActiveSignal) {
+        await releaseTodaySignalLock();
+      }
 
       await syncSignalLogsFromDb();
     } else {
