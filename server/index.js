@@ -17,6 +17,7 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SOURCE_CHAT_ID = process.env.SOURCE_CHAT_ID;
+const SOURCE_CHAT_ID_2 = process.env.SOURCE_CHAT_ID_2;
 const TARGET_CHAT_ID = process.env.TARGET_CHAT_ID;
 const PORT = process.env.PORT || 4000;
 
@@ -121,6 +122,20 @@ function isSignalMessage(message) {
   return hasSignalImage(message);
 }
 
+function getSourceRoom(sourceChatId) {
+  const chatId = String(sourceChatId);
+
+  if (SOURCE_CHAT_ID && chatId === String(SOURCE_CHAT_ID)) {
+    return "1번방";
+  }
+
+  if (SOURCE_CHAT_ID_2 && chatId === String(SOURCE_CHAT_ID_2)) {
+    return "2번방";
+  }
+
+  return null;
+}
+
 function requireSupabase() {
   if (!supabase) {
     throw new Error(
@@ -134,6 +149,7 @@ function requireSupabase() {
 function mapSentLog(row) {
   return {
     id: row.id,
+    sourceRoom: row.source_room || "",
     order: row.signal_order,
     orderText:
       row.order_text ||
@@ -155,6 +171,7 @@ function mapSentLog(row) {
 function mapBlockedLog(row) {
   return {
     id: row.id,
+    sourceRoom: row.source_room || "",
     signal: row.signal || "",
     messageId: row.source_message_id,
     sourceChatId: row.source_chat_id,
@@ -212,6 +229,7 @@ async function createSentSignalLog(payload) {
     .insert({
       log_date: today,
       log_type: "sent",
+      source_room: payload.sourceRoom || "",
       signal_order: payload.order,
       order_text: payload.orderText,
       signal: payload.signal || "",
@@ -248,6 +266,7 @@ async function createBlockedSignalLog(payload) {
     .insert({
       log_date: today,
       log_type: "blocked",
+      source_room: payload.sourceRoom || "",
       signal_order: null,
       order_text: null,
       signal: payload.signal || "",
@@ -428,13 +447,14 @@ async function forwardMessageToTarget(message) {
   });
 }
 
-async function addBlockedSignal(message, reason) {
+async function addBlockedSignal(message, reason, sourceRoom) {
   const direction = getSignalDirection(message);
 
   const fallbackId = blockedSignals.length + 1;
 
   return createBlockedSignalLog({
     id: fallbackId,
+    sourceRoom,
     signal: direction,
     messageId: message.message_id,
     sourceChatId: message.chat.id,
@@ -446,8 +466,9 @@ async function addBlockedSignal(message, reason) {
 
 async function handleSignalMessage(message) {
   const sourceChatId = String(message.chat.id);
+  const sourceRoom = getSourceRoom(sourceChatId);
 
-  if (SOURCE_CHAT_ID && sourceChatId !== String(SOURCE_CHAT_ID)) {
+  if (!sourceRoom) {
     return;
   }
 
@@ -458,12 +479,12 @@ async function handleSignalMessage(message) {
   await syncSignalLogsFromDb();
 
   if (!botEnabled) {
-    await addBlockedSignal(message, "봇이 비활성 상태라 미전송");
+    await addBlockedSignal(message, "봇이 비활성 상태라 미전송", sourceRoom);
     return;
   }
 
   if (signalRunning) {
-    await addBlockedSignal(message, "진행중 유입으로 미전송");
+    await addBlockedSignal(message, "진행중 유입으로 미전송", sourceRoom);
     return;
   }
 
@@ -482,6 +503,7 @@ async function handleSignalMessage(message) {
     id: order,
     order,
     orderText: `${orderNames[order - 1] || `${order}번째`} 시그널`,
+    sourceRoom,
     signal: direction,
     sourceMessageId: message.message_id,
     forwardedMessageId: forwarded.message_id,
@@ -519,6 +541,10 @@ app.get("/api/status", async (req, res) => {
       blockedSignals,
       supabaseConnected: Boolean(supabase),
       logDate: getTodayLogDate(),
+      sourceRooms: {
+        room1: SOURCE_CHAT_ID ? "설정됨" : "미설정",
+        room2: SOURCE_CHAT_ID_2 ? "설정됨" : "미설정",
+      },
     });
   } catch (error) {
     res.status(500).json({
@@ -630,6 +656,7 @@ app.post("/api/lock-position", async (req, res) => {
         id: order,
         order,
         orderText: `${orderNames[order - 1] || `${order}번째`} 시그널`,
+        sourceRoom: "수동",
         signal: "",
         sourceMessageId: null,
         forwardedMessageId: null,
@@ -924,6 +951,7 @@ app.get("/api/telegram-updates", async (req, res) => {
       return {
         updateId: update.update_id,
         chatId: message.chat.id,
+        sourceRoom: getSourceRoom(message.chat.id),
         chatTitle:
           message.chat.title || message.chat.username || message.chat.first_name,
         chatType: message.chat.type,
@@ -956,7 +984,7 @@ app.get("/api/test-forward-latest", async (req, res) => {
     const messages = updates
       .map((update) => update.message || update.channel_post)
       .filter(Boolean)
-      .filter((message) => String(message.chat.id) === String(SOURCE_CHAT_ID))
+      .filter((message) => Boolean(getSourceRoom(message.chat.id)))
       .filter((message) => isSignalMessage(message));
 
     const latestMessage = messages[messages.length - 1];
@@ -974,6 +1002,7 @@ app.get("/api/test-forward-latest", async (req, res) => {
     res.json({
       ok: true,
       message: "최신 이미지 신호를 전달방으로 전달했습니다.",
+      sourceRoom: getSourceRoom(latestMessage.chat.id),
       sourceChatId: latestMessage.chat.id,
       sourceMessageId: latestMessage.message_id,
       forwardedMessageId: forwarded.message_id,

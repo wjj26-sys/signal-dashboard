@@ -65,6 +65,7 @@ function normalizeServerSignal(item) {
 
   return {
     id: item.id,
+    sourceRoom: item.sourceRoom || "",
     order: orderText,
     startTime: item.startedAt || "-",
     endTime: item.endedAt || (item.status === "종료" ? "-" : "진행중"),
@@ -487,6 +488,7 @@ export default function App() {
     setBlockedSignals(
       serverBlockedSignals.map((item) => ({
         id: item.id,
+        sourceRoom: item.sourceRoom || "",
         time: item.time || "-",
         reason: item.reason || "미전송",
       }))
@@ -858,7 +860,10 @@ export default function App() {
                 blockedSignals.map((item) => (
                   <div className="blocked-item" key={item.id}>
                     <div>
-                      <p>{item.reason}</p>
+                      <p>
+                        {item.sourceRoom ? `${item.sourceRoom} / ` : ""}
+                        {item.reason}
+                      </p>
                     </div>
 
                     <div className="blocked-actions">
@@ -1061,6 +1066,7 @@ export default function App() {
               <table className="signal-table">
                 <thead>
                   <tr>
+                    <th>방</th>
                     <th>순서</th>
                     <th>시작</th>
                     <th>종료</th>
@@ -1073,13 +1079,14 @@ export default function App() {
                 <tbody>
                   {signals.length === 0 ? (
                     <tr>
-                      <td colSpan="6" className="empty-table-cell">
-                        아직 전송된 시그널이 없습니다.
+                      <td colSpan="7" className="empty-table-cell">
+                         아직 전송된 시그널이 없습니다.
                       </td>
                     </tr>
                   ) : (
                     signals.map((item) => (
                       <tr key={item.id}>
+                        <td>{item.sourceRoom || "-"}</td>
                         <td>{item.order}</td>
                         <td>{item.startTime}</td>
                         <td>{item.endTime}</td>

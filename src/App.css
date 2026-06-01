@@ -976,3 +976,39 @@ textarea:focus {
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+.signal-table {
+  min-width: 780px;
+}
+
+.signal-table th:nth-child(1),
+.signal-table td:nth-child(1) {
+  width: 80px;
+}
+
+.signal-table th:nth-child(2),
+.signal-table td:nth-child(2) {
+  width: 140px;
+}
+
+.signal-table th:nth-child(3),
+.signal-table td:nth-child(3),
+.signal-table th:nth-child(4),
+.signal-table td:nth-child(4) {
+  width: 80px;
+}
+
+.signal-table th:nth-child(5),
+.signal-table td:nth-child(5) {
+  width: 130px;
+}
+
+.signal-table th:nth-child(6),
+.signal-table td:nth-child(6) {
+  width: 90px;
+}
+
+.signal-table th:nth-child(7),
+.signal-table td:nth-child(7) {
+  width: 80px;
+}
