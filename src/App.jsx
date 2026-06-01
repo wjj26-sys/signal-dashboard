@@ -266,11 +266,9 @@ export default function App() {
 기준 진입가: ${baseEntry}
 
 2차 진입가: ${entry2}
-2차 평균가: ${formatNumber(calc.secondAverage)}
 2차 TP: ${formatNumber(calc.secondTp)}
 
 3차 진입가: ${entry3}
-3차 평균가: ${formatNumber(calc.thirdAverage)}
 3차 TP: ${formatNumber(calc.thirdTp)}`;
   }, [tradeSymbol, direction, baseEntry, entry2, entry3, calc]);
 
