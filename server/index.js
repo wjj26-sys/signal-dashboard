@@ -162,6 +162,8 @@ function mapSentLog(row) {
     endedAt: row.ended_at,
     status: row.status || "진행중",
     text: row.message_text || "",
+    positions: row.positions_json || null,
+    resultSummary: row.result_summary || "",
     logDate: row.log_date,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -764,6 +766,58 @@ app.post("/api/lock-position", async (req, res) => {
       message: "포지션 진행중 상태로 잠금 처리되었습니다.",
       botEnabled,
       signalRunning,
+      activeSignal,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.patch("/api/sent-signals/:id/result", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const positions = req.body.positions || [];
+    const resultSummary = req.body.resultSummary || "확인중";
+
+    if (!Array.isArray(positions)) {
+      return res.status(400).json({
+        ok: false,
+        error: "positions 값은 배열이어야 합니다.",
+      });
+    }
+
+    if (supabase) {
+      const { error } = await supabase
+        .from("signal_logs")
+        .update({
+          positions_json: positions,
+          result_summary: resultSummary,
+        })
+        .eq("id", id)
+        .eq("log_type", "sent");
+
+      if (error) throw error;
+
+      await syncSignalLogsFromDb();
+    } else {
+      sentSignals = sentSignals.map((item) =>
+        String(item.id) === String(id)
+          ? {
+              ...item,
+              positions,
+              resultSummary,
+            }
+          : item
+      );
+    }
+
+    res.json({
+      ok: true,
+      message: "시그널 결과를 저장했습니다.",
+      sentSignals,
       activeSignal,
     });
   } catch (error) {

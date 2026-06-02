@@ -63,15 +63,22 @@ function normalizeServerSignal(item) {
     item.orderText ||
     `${orderNames[item.order - 1] || `${item.order}번째`} 시그널`;
 
+  const savedPositions =
+    Array.isArray(item.positions) && item.positions.length > 0
+      ? item.positions
+      : makeDefaultPositions();
+
   return {
     id: item.id,
     sourceRoom: item.sourceRoom || "",
     order: orderText,
     startTime: item.startedAt || "-",
     endTime: item.endedAt || (item.status === "종료" ? "-" : "진행중"),
-    result: item.status === "종료" ? "결과 입력 필요" : "확인중",
+    result:
+      item.resultSummary ||
+      (item.status === "종료" ? "결과 입력 필요" : "확인중"),
     status: item.status || "진행중",
-    positions: makeDefaultPositions(),
+    positions: savedPositions,
   };
 }
 
@@ -479,8 +486,11 @@ export default function App() {
 
         return {
           ...normalized,
-          positions: previous?.positions || normalized.positions,
-          result: previous?.result || normalized.result,
+          positions:
+            Array.isArray(normalized.positions) && normalized.positions.length > 0
+              ? normalized.positions
+              : previous?.positions || makeDefaultPositions(),
+          result: normalized.result || previous?.result || "확인중",
         };
       });
     });
@@ -573,7 +583,7 @@ export default function App() {
     );
   };
 
-  const applyPositionRecord = () => {
+  const applyPositionRecord = async () => {
     if (isUiLocked) return;
 
     if (!selectedSignalId) {
@@ -581,21 +591,56 @@ export default function App() {
       return;
     }
 
-    setSignals((prev) =>
-      prev.map((item) => {
-        if (String(item.id) !== String(selectedSignalId)) return item;
+    const moneyResults = positionDraft
+      .filter((position) => position.amount.trim() !== "")
+      .map((position) => formatMoney(position.amount));
 
-        const moneyResults = positionDraft
-          .filter((position) => position.amount.trim() !== "")
-          .map((position) => formatMoney(position.amount));
+    const resultSummary =
+      moneyResults.length > 0 ? moneyResults.join(" / ") : "확인중";
 
-        return {
-          ...item,
-          positions: clonePositions(positionDraft),
-          result: moneyResults.length > 0 ? moneyResults.join(" / ") : "확인중",
-        };
-      })
-    );
+    try {
+      setServerLoading(true);
+
+      const response = await fetch(
+        `${API_BASE_URL}/api/sent-signals/${selectedSignalId}/result`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            positions: clonePositions(positionDraft),
+            resultSummary,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!data.ok) {
+        alert(data.error || "선택 결과 저장에 실패했어요.");
+        return;
+      }
+
+      setSignals((prev) =>
+        prev.map((item) => {
+          if (String(item.id) !== String(selectedSignalId)) return item;
+
+          return {
+            ...item,
+            positions: clonePositions(positionDraft),
+            result: resultSummary,
+          };
+        })
+      );
+
+     await fetchServerStatus();
+    } catch (error) {
+      alert("선택 결과 저장 중 오류가 발생했어요.");
+      console.error(error);
+    } finally {
+      setServerLoading(false);
+    }
   };
 
   const savePositionRecord = async () => {
