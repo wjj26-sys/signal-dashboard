@@ -96,12 +96,14 @@ function sanitizeAmount(value) {
   return `${parts[0]}.${parts.slice(1).join("")}`;
 }
 
-function formatMoney(amount) {
+function formatMoney(amount, result = "") {
   const value = String(amount).trim();
 
   if (value === "") return "";
 
-  return `+$${value}`;
+  const isLoss = String(result).includes("손절");
+
+  return `${isLoss ? "-" : "+"}$${value}`;
 }
 
 function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
@@ -154,7 +156,7 @@ function makePositionText(signals, tradeDate, tradeSymbol) {
 
           return `${position.round} ${tradeSymbol} ${
             position.result
-          }: ${formatMoney(position.amount)}`;
+          }: ${formatMoney(position.amount, position.result)}`;
         })
         .join("\n");
 
@@ -593,7 +595,7 @@ export default function App() {
 
     const moneyResults = positionDraft
       .filter((position) => position.amount.trim() !== "")
-      .map((position) => formatMoney(position.amount));
+      .map((position) => formatMoney(position.amount, position.result));
 
     const resultSummary =
       moneyResults.length > 0 ? moneyResults.join(" / ") : "확인중";
