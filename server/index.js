@@ -516,6 +516,88 @@ async function forwardMessageToTarget(message) {
   });
 }
 
+async function sendTextMessageToTarget(text) {
+  if (!TARGET_CHAT_ID) {
+    throw new Error("TARGET_CHAT_ID가 Render 환경변수 또는 .env에 없습니다.");
+  }
+
+  return telegramApi("sendMessage", {
+    chat_id: TARGET_CHAT_ID,
+    text,
+  });
+}
+
+function formatTvValue(value) {
+  if (value === undefined || value === null || value === "") return "-";
+  return String(value).trim();
+}
+
+function makeTradingViewMessage(payload) {
+  const event = String(payload.event || payload.type || "").toLowerCase();
+  const direction = String(payload.direction || "").toUpperCase();
+
+  const symbol = payload.symbolText || payload.symbol || "XAUUSD(금/GOLD)";
+  const round = Number(payload.round || payload.step || payload.entryRound);
+  const entry = formatTvValue(payload.entry);
+  const tp = formatTvValue(payload.tp);
+  const sl = formatTvValue(payload.sl);
+  const lot = formatTvValue(payload.lot || "1랏");
+
+  if (event === "tp") {
+    return `✅✅TP(익절가) 도달 완료✅✅
+✅✅TP(익절가) 도달 완료✅✅
+
+모든 회차 정리 진행하겠습니다`;
+  }
+
+  if (event === "sl") {
+    return `🟥🟥 SL(손절가) 도달 완료🟥🟥
+🟥🟥 SL(손절가) 도달 완료🟥🟥
+
+모든 회차 정리 진행하겠습니다`;
+  }
+
+  if (event !== "entry") {
+    throw new Error("event 값은 entry, tp, sl 중 하나여야 합니다.");
+  }
+
+  if (![2, 3].includes(round)) {
+    throw new Error("entry 알림은 round 값이 2 또는 3이어야 합니다.");
+  }
+
+  if (!["LONG", "SHORT"].includes(direction)) {
+    throw new Error("direction 값은 LONG 또는 SHORT 이어야 합니다.");
+  }
+
+  const isLong = direction === "LONG";
+  const header = isLong
+    ? `🟢🟢🟢상승🟢🟢🟢
+🟢🟢🟢상승🟢🟢🟢`
+    : `🔴🔴🔴하락🔴🔴🔴
+🔴🔴🔴하락🔴🔴🔴`;
+
+  const roundLabel = `${round}회차`;
+  const orderLabel =
+    round === 2 ? "1회차 / 2회차" : "1회차 / 2회차 / 3회차";
+
+  return `${header}
+ 
+- ${roundLabel} 진입가 도달
+- ${roundLabel} 예약매매 진행 안하신분들 매수 진행
+- ${orderLabel} 주문 아래 TP로 수정 부탁드리겠습니다.
+
+${symbol}
+
+📍 ${roundLabel} 진입가 : ${entry}
+📍 비중 : ${lot}
+
+✅ TP(익절가) : ${tp} (수정값)
+🛑 SL(손절가) : ${sl}
+
+※본인 시드에 따라 다르게 적용
+※투자 관련 책임 / 권리는 투자자 본인에게`;
+}
+
 async function addBlockedSignal(message, reason, sourceRoom) {
   const direction = getSignalDirection(message);
 
@@ -1199,6 +1281,38 @@ app.get("/api/set-webhook", async (req, res) => {
       result,
     });
   } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/tradingview-webhook", async (req, res) => {
+  try {
+    const payload = req.body || {};
+
+    const expectedSecret = process.env.TRADINGVIEW_WEBHOOK_SECRET;
+
+    if (expectedSecret && payload.secret !== expectedSecret) {
+      return res.status(401).json({
+        ok: false,
+        error: "인증값이 맞지 않습니다.",
+      });
+    }
+
+    const message = makeTradingViewMessage(payload);
+
+    await sendTextMessageToTarget(message);
+
+    res.json({
+      ok: true,
+      message: "트레이딩뷰 알림을 텔레그램으로 전송했습니다.",
+      sentText: message,
+    });
+  } catch (error) {
+    console.error("TradingView Webhook Error:", error.message);
+
     res.status(500).json({
       ok: false,
       error: error.message,
