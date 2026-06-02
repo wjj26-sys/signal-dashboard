@@ -1301,6 +1301,24 @@ app.post("/api/tradingview-webhook", async (req, res) => {
       });
     }
 
+    await syncSignalLogsFromDb();
+
+    if (!botEnabled) {
+      return res.json({
+        ok: true,
+        ignored: true,
+        reason: "봇 잠금 상태라 트레이딩뷰 알림을 무시했습니다.",
+      });
+    }
+
+    if (!activeSignal || activeSignal.status !== "진행중") {
+      return res.json({
+        ok: true,
+        ignored: true,
+        reason: "진행중 포지션이 없어 트레이딩뷰 알림을 무시했습니다.",
+      });
+    }
+
     const message = makeTradingViewMessage(payload);
 
     await sendTextMessageToTarget(message);
