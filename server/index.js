@@ -879,11 +879,11 @@ async function fetchXauUsdPrice() {
     throw new Error(`지원하지 않는 PRICE_PROVIDER입니다: ${PRICE_PROVIDER}`);
   }
 
-  if (!GOLD_API_KEY) {
+  if (!GOLD_API_KEY || GOLD_API_KEY === "발급받은_API_KEY") {
     throw new Error("GOLD_API_KEY가 Render 환경변수에 없습니다.");
   }
 
-  const url = `https://app.goldapi.net/price/XAU?x-api-key=${encodeURIComponent(
+  const url = `https://app.goldapi.net/price/XAU/USD?x-api-key=${encodeURIComponent(
     GOLD_API_KEY
   )}`;
 
