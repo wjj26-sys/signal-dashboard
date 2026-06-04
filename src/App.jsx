@@ -693,10 +693,10 @@ const calcText = useMemo(() => {
   useEffect(() => {
     if (!showChart) return;
 
-    fetchPriceHistory();
+    fetchInitialPriceHistory();
 
     const timer = setInterval(() => {
-      fetchPriceHistory();
+      fetchInitialPriceHistory();
     }, 15000);
 
     return () => clearInterval(timer);
