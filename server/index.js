@@ -1116,7 +1116,7 @@ app.post("/api/trade-watch/start", async (req, res) => {
     const thirdTp = toWatchNumber(setup.third_tp);
     const slPrice = toWatchNumber(setup.sl_price);
 
-    if (!firstTp || !slPrice) {
+    if (firstTp === null || slPrice === null) {
       return res.status(400).json({
         ok: false,
         error: "1차 TP와 SL 손절가가 필요합니다.",
