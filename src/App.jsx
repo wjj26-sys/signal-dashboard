@@ -382,11 +382,48 @@ const calcText = useMemo(() => {
     }
   };
 
-  const fetchPriceHistory = async () => {
+  const appendPriceTick = (tick) => {
+    if (!tick || tick.price === null || tick.price === undefined) return;
+
+    const checkedAt =
+      tick.checkedAt ||
+      tick.createdAt ||
+      tick.timestamp ||
+      new Date().toISOString();
+
+    const item = {
+      id: tick.id || `${checkedAt}-${tick.price}`,
+      symbol: "XAUUSD",
+      price: tick.price,
+      bid: tick.bid ?? null,
+      ask: tick.ask ?? null,
+      provider: tick.provider || "gold_api_free",
+      source: tick.source || "live",
+      checkedAt,
+      createdAt: checkedAt,
+    };
+
+    setPriceHistory((prev) => {
+      const map = new Map();
+
+      [...prev, item].forEach((row) => {
+        const key = row.id || row.checkedAt || row.createdAt;
+        map.set(key, row);
+      });
+
+      return Array.from(map.values())
+        .sort(
+          (a, b) =>
+            new Date(a.checkedAt || a.createdAt).getTime() -
+            new Date(b.checkedAt || b.createdAt).getTime()
+        )
+        .slice(-1000);
+    });
+  };
+
+  const fetchInitialPriceHistory = async () => {
     try {
       setPriceHistoryLoading(true);
-
-      await fetch(`${API_BASE_URL}/api/xauusd-price`);
 
       const response = await fetch(`${API_BASE_URL}/api/xauusd-history?limit=1000`);
       const data = await response.json();
@@ -401,6 +438,31 @@ const calcText = useMemo(() => {
       console.error("가격 기록 불러오기 오류:", error);
     } finally {
       setPriceHistoryLoading(false);
+    }
+  };
+
+  const fetchLatestPriceTick = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/xauusd-price`);
+      const data = await response.json();
+
+      if (!data.ok) {
+        console.error("최신 가격 불러오기 실패:", data.error);
+        return;
+      }
+
+      appendPriceTick(
+        data.savedTick || {
+          price: data.price,
+          bid: data.bid,
+          ask: data.ask,
+          provider: data.provider,
+          checkedAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        }
+      );
+    } catch (error) {
+      console.error("최신 가격 불러오기 오류:", error);
     }
   };
 
