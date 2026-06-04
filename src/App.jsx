@@ -486,7 +486,7 @@ const calcText = useMemo(() => {
       setSavedTradeSetup(data.setup || currentTradeSetup);
       setSetupSaved(true);
 
-      setTimeout(() => setSetupSaved(false), 1500);
+      setTimeout(() => setSetupSaved(false), 3000);
     } catch (error) {
       alert("계산값 저장 중 오류가 발생했어요.");
       console.error(error);
