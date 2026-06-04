@@ -883,6 +883,10 @@ async function fetchXauUsdPrice() {
     throw new Error("GOLD_API_KEY가 Render 환경변수에 없습니다.");
   }
 
+  const url = `https://app.goldapi.net/price/XAU?x-api-key=${encodeURIComponent(
+    GOLD_API_KEY
+  )}`;
+
   const response = await fetch(url);
 
   if (!response.ok) {
@@ -891,10 +895,6 @@ async function fetchXauUsdPrice() {
   }
 
   const data = await response.json();
-
-  const url = `https://app.goldapi.net/price/XAU?x-api-key=${encodeURIComponent(
-    GOLD_API_KEY
-  )}`;
 
   const price = Number(data.price ?? data.ask ?? data.bid);
 
