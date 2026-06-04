@@ -1154,3 +1154,38 @@ textarea:focus {
   border-radius: 20px;
   overflow: hidden;
 }
+
+.watch-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.watch-actions .copy-button {
+  width: 100%;
+  min-height: 44px;
+}
+
+.watch-status-box {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: #f8fafc;
+}
+
+.watch-status-box span {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.watch-status-box strong {
+  font-size: 15px;
+  font-weight: 900;
+  color: #0f172a;
+}

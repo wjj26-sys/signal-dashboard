@@ -259,6 +259,9 @@ export default function App() {
   const [savedTradeSetup, setSavedTradeSetup] = useState(null);
   const [slPrice, setSlPrice] = useState("");
 
+  const [watchStatus, setWatchStatus] = useState(null);
+  const [watchLoading, setWatchLoading] = useState(false);
+
   const currentSignal = signals.find((item) => item.status === "진행중");
   const selectedSignal = signals.find(
     (item) => String(item.id) === String(selectedSignalId)
@@ -357,6 +360,80 @@ const calcText = useMemo(() => {
       setSlPrice(setup.slPrice === null ? "" : String(setup.slPrice));
     } catch (error) {
       console.error("계산값 불러오기 실패:", error);
+    }
+  };
+
+  const fetchTradeWatch = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/trade-watch`);
+      const data = await response.json();
+
+      if (!data.ok) {
+        console.error("자동 감시 상태 불러오기 실패:", data.error);
+        return;
+      }
+
+      setWatchStatus(data);
+    } catch (error) {
+      console.error("자동 감시 상태 불러오기 오류:", error);
+    }
+  };
+
+  const startTradeWatch = async () => {
+    const ok = window.confirm("저장된 계산값 기준으로 XAUUSD 자동 감시를 시작할까요?");
+
+    if (!ok) return;
+
+    try {
+      setWatchLoading(true);
+
+      const response = await fetch(`${API_BASE_URL}/api/trade-watch/start`, {
+        method: "POST",
+      });
+
+      const data = await response.json();
+
+      if (!data.ok) {
+        alert(data.error || "자동 감시 시작에 실패했어요.");
+        return;
+      }
+
+      alert("자동 감시를 시작했습니다.");
+      await fetchTradeWatch();
+    } catch (error) {
+      alert("자동 감시 시작 중 오류가 발생했어요.");
+      console.error(error);
+    } finally {
+      setWatchLoading(false);
+    }
+  };
+
+  const stopTradeWatch = async () => {
+    const ok = window.confirm("XAUUSD 자동 감시를 중지할까요?");
+
+    if (!ok) return;
+
+    try {
+      setWatchLoading(true);
+
+      const response = await fetch(`${API_BASE_URL}/api/trade-watch/stop`, {
+        method: "POST",
+      });
+
+      const data = await response.json();
+
+      if (!data.ok) {
+        alert(data.error || "자동 감시 중지에 실패했어요.");
+        return;
+      }
+
+      alert("자동 감시를 중지했습니다.");
+      await fetchTradeWatch();
+    } catch (error) {
+      alert("자동 감시 중지 중 오류가 발생했어요.");
+      console.error(error);
+    } finally {
+      setWatchLoading(false);
     }
   };
 
@@ -525,6 +602,16 @@ const calcText = useMemo(() => {
       setArchiveLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchTradeWatch();
+
+    const timer = setInterval(() => {
+      fetchTradeWatch();
+    }, 10000);
+
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (archives.length === 0) {
@@ -1076,6 +1163,38 @@ const calcText = useMemo(() => {
                   {calcCopied ? "복사완료" : "계산값 복사"}
                 </button>
               </div>
+            </div>
+
+            <div className="watch-actions">
+              <button
+                className="copy-button"
+                onClick={startTradeWatch}
+                disabled={watchLoading || isUiLocked}
+              >
+                감시 시작
+              </button>
+
+              <button
+                className="copy-button light"
+                onClick={stopTradeWatch}
+                disabled={watchLoading || isUiLocked}
+              >
+                감시 중지
+              </button>
+            </div>
+
+            <div className="watch-status-box">
+              <span>자동 감시</span>
+              <strong>
+                {watchStatus?.watch?.isActive ? "감시중" : "중지됨"}
+              </strong>
+
+              <span>마지막 가격</span>
+              <strong>
+                {watchStatus?.watch?.lastPrice
+                 ? Number(watchStatus.watch.lastPrice).toFixed(2)
+                 : "-"}
+              </strong>
             </div>
 
             <div className="form-grid">
