@@ -947,6 +947,54 @@ async function fetchXauUsdPrice() {
   throw new Error(`지원하지 않는 PRICE_PROVIDER입니다: ${PRICE_PROVIDER}`);
 }
 
+function mapPriceTick(row) {
+  return {
+    id: row.id,
+    symbol: row.symbol || "XAUUSD",
+    price: row.price,
+    bid: row.bid,
+    ask: row.ask,
+    provider: row.provider,
+    source: row.source,
+    checkedAt: row.checked_at,
+    createdAt: row.created_at,
+  };
+}
+
+async function saveXauUsdPriceTick(priceData, source = "manual") {
+  try {
+    const db = requireSupabase();
+
+    const { data, error } = await db
+      .from("xauusd_price_ticks")
+      .insert({
+        symbol: "XAUUSD",
+        price: toNullableNumber(priceData.price),
+        bid: toNullableNumber(priceData.bid),
+        ask: toNullableNumber(priceData.ask),
+        provider: PRICE_PROVIDER,
+        source,
+        checked_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+
+    await db
+      .from("xauusd_price_ticks")
+      .delete()
+      .lt("created_at", cutoff);
+
+    return data;
+  } catch (error) {
+    console.error("가격 기록 저장 실패:", error.message);
+    return null;
+  }
+}
+
 function makeEntryReachMessage({ direction, round, entry, tp, sl }) {
   const isLong = direction === "LONG";
 
@@ -1058,11 +1106,41 @@ async function stopTradeWatchState(reason = "stopped") {
 app.get("/api/xauusd-price", async (req, res) => {
   try {
     const priceData = await fetchXauUsdPrice();
+    const savedTick = await saveXauUsdPriceTick(priceData, "manual");
 
     res.json({
       ok: true,
       provider: PRICE_PROVIDER,
       ...priceData,
+      savedTick: savedTick ? mapPriceTick(savedTick) : null,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.get("/api/xauusd-history", async (req, res) => {
+  try {
+    const db = requireSupabase();
+
+    const limit = Math.min(Number(req.query.limit || 240), 1000);
+
+    const { data, error } = await db
+      .from("xauusd_price_ticks")
+      .select("*")
+      .eq("symbol", "XAUUSD")
+      .order("checked_at", { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      provider: PRICE_PROVIDER,
+      history: (data || []).reverse().map(mapPriceTick),
     });
   } catch (error) {
     res.status(500).json({
@@ -1215,6 +1293,8 @@ async function checkTradeWatchOnce() {
     }
 
     const priceData = await fetchXauUsdPrice();
+    await saveXauUsdPriceTick(priceData, "watch");
+
     const price = priceData.price;
     const direction = watch.direction || "LONG";
 

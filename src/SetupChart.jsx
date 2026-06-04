@@ -1,16 +1,39 @@
 import React, { useEffect, useMemo, useRef } from "react";
-import { createChart, CandlestickSeries, LineStyle } from "lightweight-charts";
+import { createChart, LineSeries, LineStyle } from "lightweight-charts";
 
 function toNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function makeDemoCandles(setup) {
+function normalizeHistory(priceHistory) {
+  const points = new Map();
+
+  (priceHistory || []).forEach((item) => {
+    const price = toNumber(item.price);
+    const dateText = item.checkedAt || item.createdAt;
+
+    if (price === null || !dateText) return;
+
+    const time = Math.floor(new Date(dateText).getTime() / 1000);
+
+    if (!Number.isFinite(time)) return;
+
+    points.set(time, {
+      time,
+      value: Number(price.toFixed(2)),
+    });
+  });
+
+  return Array.from(points.values()).sort((a, b) => a.time - b.time);
+}
+
+function makeFallbackLine(setup) {
   const values = [
     setup.baseEntry,
     setup.entry2,
     setup.entry3,
+    setup.firstTp,
     setup.secondTp,
     setup.thirdTp,
     setup.slPrice,
@@ -24,32 +47,34 @@ function makeDemoCandles(setup) {
       : 4500;
 
   const now = Math.floor(Date.now() / 1000);
-  const candles = [];
+  const points = [];
 
-  for (let index = 20; index >= 1; index -= 1) {
-    const time = now - index * 300;
-    const wave = Math.sin(index / 2.5) * 8;
-    const open = center + wave;
-    const close = open + Math.cos(index / 1.7) * 4;
-    const high = Math.max(open, close) + 5;
-    const low = Math.min(open, close) - 5;
+  for (let index = 30; index >= 1; index -= 1) {
+    const time = now - index * 60;
+    const wave = Math.sin(index / 3) * 5;
+    const value = center + wave;
 
-    candles.push({
+    points.push({
       time,
-      open: Number(open.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      low: Number(low.toFixed(2)),
-      close: Number(close.toFixed(2)),
+      value: Number(value.toFixed(2)),
     });
   }
 
-  return candles;
+  return points;
 }
 
-export default function SetupChart({ setup }) {
+export default function SetupChart({ setup, priceHistory }) {
   const containerRef = useRef(null);
 
-  const candles = useMemo(() => makeDemoCandles(setup || {}), [setup]);
+  const lineData = useMemo(() => {
+    const realData = normalizeHistory(priceHistory);
+
+    if (realData.length >= 2) {
+      return realData;
+    }
+
+    return makeFallbackLine(setup || {});
+  }, [priceHistory, setup]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -75,22 +100,27 @@ export default function SetupChart({ setup }) {
       },
     });
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#16a34a",
-      downColor: "#ef4444",
-      borderUpColor: "#16a34a",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#16a34a",
-      wickDownColor: "#ef4444",
+    const priceSeries = chart.addSeries(LineSeries, {
+      lineWidth: 2,
+      priceFormat: {
+        type: "price",
+        precision: 2,
+        minMove: 0.01,
+      },
     });
 
-    candleSeries.setData(candles);
+    priceSeries.setData(lineData);
 
     const priceLines = [
       {
         value: setup?.slPrice,
         title: "SL 손절",
         color: "#2563eb",
+      },
+      {
+        value: setup?.firstTp,
+        title: "1차 TP",
+        color: "#16a34a",
       },
       {
         value: setup?.secondTp,
@@ -121,7 +151,7 @@ export default function SetupChart({ setup }) {
 
       const roundedPrice = Math.round(price);
 
-      candleSeries.createPriceLine({
+      priceSeries.createPriceLine({
         price: roundedPrice,
         color: line.color,
         lineWidth: 2,
@@ -147,7 +177,7 @@ export default function SetupChart({ setup }) {
       window.removeEventListener("resize", handleResize);
       chart.remove();
     };
-  }, [candles, setup]);
+  }, [lineData, setup]);
 
   return <div className="setup-chart-box" ref={containerRef} />;
 }

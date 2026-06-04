@@ -262,6 +262,9 @@ export default function App() {
   const [watchStatus, setWatchStatus] = useState(null);
   const [watchLoading, setWatchLoading] = useState(false);
 
+  const [priceHistory, setPriceHistory] = useState([]);
+  const [priceHistoryLoading, setPriceHistoryLoading] = useState(false);
+
   const currentSignal = signals.find((item) => item.status === "진행중");
   const selectedSignal = signals.find(
     (item) => String(item.id) === String(selectedSignalId)
@@ -376,6 +379,28 @@ const calcText = useMemo(() => {
       setWatchStatus(data);
     } catch (error) {
       console.error("자동 감시 상태 불러오기 오류:", error);
+    }
+  };
+
+  const fetchPriceHistory = async () => {
+    try {
+      setPriceHistoryLoading(true);
+
+      await fetch(`${API_BASE_URL}/api/xauusd-price`);
+
+      const response = await fetch(`${API_BASE_URL}/api/xauusd-history?limit=240`);
+      const data = await response.json();
+
+      if (!data.ok) {
+        console.error("가격 기록 불러오기 실패:", data.error);
+        return;
+      }
+
+      setPriceHistory(data.history || []);
+    } catch (error) {
+      console.error("가격 기록 불러오기 오류:", error);
+    } finally {
+      setPriceHistoryLoading(false);
     }
   };
 
@@ -602,6 +627,18 @@ const calcText = useMemo(() => {
       setArchiveLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!showChart) return;
+
+    fetchPriceHistory();
+
+    const timer = setInterval(() => {
+      fetchPriceHistory();
+    }, 15000);
+
+    return () => clearInterval(timer);
+  }, [showChart]);
 
   useEffect(() => {
     fetchTradeWatch();
@@ -1545,7 +1582,10 @@ const calcText = useMemo(() => {
               <span className="legend-item entry3">빨강: 3차 진입</span>
             </div>
 
-            <SetupChart setup={savedTradeSetup || currentTradeSetup} />
+            <SetupChart
+              setup={savedTradeSetup || currentTradeSetup}
+              priceHistory={priceHistory}
+            />
           </div>
         </div>
       )}
