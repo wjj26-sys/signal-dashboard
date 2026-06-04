@@ -1,34 +1,62 @@
 import React, { useEffect, useMemo, useRef } from "react";
-import { createChart, LineSeries, LineStyle } from "lightweight-charts";
+import { createChart, CandlestickSeries, LineStyle } from "lightweight-charts";
 
 function toNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function normalizeHistory(priceHistory) {
-  const points = new Map();
+function makeFiveMinuteCandles(priceHistory) {
+  const bucketMs = 5 * 60 * 1000;
+  const candleMap = new Map();
 
-  (priceHistory || []).forEach((item) => {
-    const price = toNumber(item.price);
-    const dateText = item.checkedAt || item.createdAt;
+  const sortedTicks = [...(priceHistory || [])]
+    .map((item) => {
+      const price = toNumber(item.price);
+      const dateText = item.checkedAt || item.createdAt;
 
-    if (price === null || !dateText) return;
+      if (price === null || !dateText) return null;
 
-    const time = Math.floor(new Date(dateText).getTime() / 1000);
+      const timestamp = new Date(dateText).getTime();
 
-    if (!Number.isFinite(time)) return;
+      if (!Number.isFinite(timestamp)) return null;
 
-    points.set(time, {
-      time,
-      value: Number(price.toFixed(2)),
-    });
+      return {
+        price,
+        timestamp,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  sortedTicks.forEach((tick) => {
+    const bucketStartMs = Math.floor(tick.timestamp / bucketMs) * bucketMs;
+    const time = Math.floor(bucketStartMs / 1000);
+    const price = Number(tick.price.toFixed(2));
+
+    const existing = candleMap.get(time);
+
+    if (!existing) {
+      candleMap.set(time, {
+        time,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+      });
+
+      return;
+    }
+
+    existing.high = Number(Math.max(existing.high, price).toFixed(2));
+    existing.low = Number(Math.min(existing.low, price).toFixed(2));
+    existing.close = price;
   });
 
-  return Array.from(points.values()).sort((a, b) => a.time - b.time);
+  return Array.from(candleMap.values()).sort((a, b) => a.time - b.time);
 }
 
-function makeFallbackLine(setup) {
+function makeFallbackCandles(setup) {
   const values = [
     setup.baseEntry,
     setup.entry2,
@@ -47,33 +75,54 @@ function makeFallbackLine(setup) {
       : 4500;
 
   const now = Math.floor(Date.now() / 1000);
-  const points = [];
+  const candles = [];
 
-  for (let index = 30; index >= 1; index -= 1) {
-    const time = now - index * 60;
-    const wave = Math.sin(index / 3) * 5;
-    const value = center + wave;
+  for (let index = 24; index >= 1; index -= 1) {
+    const time = now - index * 300;
+    const wave = Math.sin(index / 2.5) * 6;
+    const open = center + wave;
+    const close = open + Math.cos(index / 1.7) * 3;
+    const high = Math.max(open, close) + 2;
+    const low = Math.min(open, close) - 2;
 
-    points.push({
+    candles.push({
       time,
-      value: Number(value.toFixed(2)),
+      open: Number(open.toFixed(2)),
+      high: Number(high.toFixed(2)),
+      low: Number(low.toFixed(2)),
+      close: Number(close.toFixed(2)),
     });
   }
 
-  return points;
+  return candles;
 }
 
 export default function SetupChart({ setup, priceHistory }) {
   const containerRef = useRef(null);
+  const chartRef = useRef(null);
+  const candleSeriesRef = useRef(null);
+  const priceLineRefs = useRef([]);
 
-  const lineData = useMemo(() => {
-    const realData = normalizeHistory(priceHistory);
+  const hasInitialDataRef = useRef(false);
+  const hasFitContentRef = useRef(false);
+  const previousCandleCountRef = useRef(0);
+  const previousLastTimeRef = useRef(null);
+  const previousModeRef = useRef("fallback");
 
-    if (realData.length >= 2) {
-      return realData;
+  const chartData = useMemo(() => {
+    const realCandles = makeFiveMinuteCandles(priceHistory);
+
+    if (realCandles.length >= 1) {
+      return {
+        mode: "real",
+        candles: realCandles,
+      };
     }
 
-    return makeFallbackLine(setup || {});
+    return {
+      mode: "fallback",
+      candles: makeFallbackCandles(setup || {}),
+    };
   }, [priceHistory, setup]);
 
   useEffect(() => {
@@ -100,8 +149,13 @@ export default function SetupChart({ setup, priceHistory }) {
       },
     });
 
-    const priceSeries = chart.addSeries(LineSeries, {
-      lineWidth: 2,
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: "#16a34a",
+      downColor: "#ef4444",
+      borderUpColor: "#16a34a",
+      borderDownColor: "#ef4444",
+      wickUpColor: "#16a34a",
+      wickDownColor: "#ef4444",
       priceFormat: {
         type: "price",
         precision: 2,
@@ -109,7 +163,91 @@ export default function SetupChart({ setup, priceHistory }) {
       },
     });
 
-    priceSeries.setData(lineData);
+    chartRef.current = chart;
+    candleSeriesRef.current = candleSeries;
+
+    const handleResize = () => {
+      if (!containerRef.current || !chartRef.current) return;
+
+      chartRef.current.applyOptions({
+        width: containerRef.current.clientWidth,
+      });
+    };
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+
+      if (chartRef.current) {
+        chartRef.current.remove();
+      }
+
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      priceLineRefs.current = [];
+
+      hasInitialDataRef.current = false;
+      hasFitContentRef.current = false;
+      previousCandleCountRef.current = 0;
+      previousLastTimeRef.current = null;
+      previousModeRef.current = "fallback";
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chartRef.current || !candleSeriesRef.current) return;
+
+    const candles = chartData.candles || [];
+    const mode = chartData.mode;
+
+    if (candles.length === 0) return;
+
+    const lastCandle = candles[candles.length - 1];
+    const modeChanged = previousModeRef.current !== mode;
+    const candleCountChanged =
+      previousCandleCountRef.current !== candles.length;
+    const lastTimeChanged = previousLastTimeRef.current !== lastCandle.time;
+
+    // 처음 열었을 때 / 가짜 데이터에서 실제 데이터로 전환될 때 / 과거 데이터가 늘어났을 때만 전체 세팅
+    if (
+      !hasInitialDataRef.current ||
+      modeChanged ||
+      candleCountChanged ||
+      lastTimeChanged
+    ) {
+      candleSeriesRef.current.setData(candles);
+
+      hasInitialDataRef.current = true;
+      previousCandleCountRef.current = candles.length;
+      previousLastTimeRef.current = lastCandle.time;
+      previousModeRef.current = mode;
+
+      // 차트 열릴 때 한 번만 자동 맞춤. 이후 사용자가 축소한 상태 유지
+      if (!hasFitContentRef.current) {
+        chartRef.current.timeScale().fitContent();
+        hasFitContentRef.current = true;
+      }
+
+      return;
+    }
+
+    // 같은 5분봉 안에서는 현재 봉만 갱신
+    candleSeriesRef.current.update(lastCandle);
+
+    previousCandleCountRef.current = candles.length;
+    previousLastTimeRef.current = lastCandle.time;
+    previousModeRef.current = mode;
+  }, [chartData]);
+
+  useEffect(() => {
+    if (!candleSeriesRef.current) return;
+
+    priceLineRefs.current.forEach((line) => {
+      candleSeriesRef.current.removePriceLine(line);
+    });
+
+    priceLineRefs.current = [];
 
     const priceLines = [
       {
@@ -151,7 +289,7 @@ export default function SetupChart({ setup, priceHistory }) {
 
       const roundedPrice = Math.round(price);
 
-      priceSeries.createPriceLine({
+      const createdLine = candleSeriesRef.current.createPriceLine({
         price: roundedPrice,
         color: line.color,
         lineWidth: 2,
@@ -159,25 +297,10 @@ export default function SetupChart({ setup, priceHistory }) {
         axisLabelVisible: true,
         title: line.title,
       });
+
+      priceLineRefs.current.push(createdLine);
     });
-
-    chart.timeScale().fitContent();
-
-    const handleResize = () => {
-      if (!containerRef.current) return;
-
-      chart.applyOptions({
-        width: containerRef.current.clientWidth,
-      });
-    };
-
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      window.removeEventListener("resize", handleResize);
-      chart.remove();
-    };
-  }, [lineData, setup]);
+  }, [setup]);
 
   return <div className="setup-chart-box" ref={containerRef} />;
 }

@@ -388,7 +388,7 @@ const calcText = useMemo(() => {
 
       await fetch(`${API_BASE_URL}/api/xauusd-price`);
 
-      const response = await fetch(`${API_BASE_URL}/api/xauusd-history?limit=240`);
+      const response = await fetch(`${API_BASE_URL}/api/xauusd-history?limit=1000`);
       const data = await response.json();
 
       if (!data.ok) {
