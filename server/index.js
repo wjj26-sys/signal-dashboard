@@ -875,40 +875,75 @@ async function sendWatchTelegramMessage(text) {
 }
 
 async function fetchXauUsdPrice() {
-  if (PRICE_PROVIDER !== "goldapi_net") {
-    throw new Error(`지원하지 않는 PRICE_PROVIDER입니다: ${PRICE_PROVIDER}`);
+  if (PRICE_PROVIDER === "gold_api_free") {
+    const url = "https://api.gold-api.com/price/XAU";
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`가격 API 오류: ${response.status} ${body}`);
+    }
+
+    const data = await response.json();
+
+    const price = Number(
+      data.price ??
+        data.rate ??
+        data.value ??
+        data.usd ??
+        data?.data?.price
+    );
+
+    if (!Number.isFinite(price)) {
+      throw new Error(
+        `가격 API 응답에서 price 값을 찾지 못했습니다: ${JSON.stringify(data)}`
+      );
+    }
+
+    return {
+      price,
+      bid: data.bid ?? null,
+      ask: data.ask ?? null,
+      timestamp: data.timestamp ?? data.updated_at ?? null,
+      raw: data,
+    };
   }
 
-  if (!GOLD_API_KEY || GOLD_API_KEY === "발급받은_API_KEY") {
-    throw new Error("GOLD_API_KEY가 Render 환경변수에 없습니다.");
+  if (PRICE_PROVIDER === "goldapi_net") {
+    if (!GOLD_API_KEY || GOLD_API_KEY === "발급받은_API_KEY") {
+      throw new Error("GOLD_API_KEY가 Render 환경변수에 없습니다.");
+    }
+
+    const url = `https://app.goldapi.net/price/XAU/USD?x-api-key=${encodeURIComponent(
+      GOLD_API_KEY
+    )}`;
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`가격 API 오류: ${response.status} ${body}`);
+    }
+
+    const data = await response.json();
+
+    const price = Number(data.price ?? data.ask ?? data.bid);
+
+    if (!Number.isFinite(price)) {
+      throw new Error("가격 API 응답에서 price 값을 찾지 못했습니다.");
+    }
+
+    return {
+      price,
+      bid: data.bid ?? null,
+      ask: data.ask ?? null,
+      timestamp: data.timestamp ?? null,
+      raw: data,
+    };
   }
 
-  const url = `https://app.goldapi.net/price/XAU/USD?x-api-key=${encodeURIComponent(
-    GOLD_API_KEY
-  )}`;
-
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`가격 API 오류: ${response.status} ${body}`);
-  }
-
-  const data = await response.json();
-
-  const price = Number(data.price ?? data.ask ?? data.bid);
-
-  if (!Number.isFinite(price)) {
-    throw new Error("가격 API 응답에서 price 값을 찾지 못했습니다.");
-  }
-
-  return {
-    price,
-    bid: data.bid ?? null,
-    ask: data.ask ?? null,
-    timestamp: data.timestamp ?? null,
-    raw: data,
-  };
+  throw new Error(`지원하지 않는 PRICE_PROVIDER입니다: ${PRICE_PROVIDER}`);
 }
 
 function makeEntryReachMessage({ direction, round, entry, tp, sl }) {
