@@ -541,6 +541,15 @@ async function sendTextMessageToTarget(text) {
   });
 }
 
+const PRICE_PROVIDER = process.env.PRICE_PROVIDER || "goldapi_net";
+const GOLD_API_KEY = process.env.GOLD_API_KEY || "";
+const PRICE_POLL_SECONDS = Math.max(
+  30,
+  Number(process.env.PRICE_POLL_SECONDS || 600)
+);
+
+let isCheckingTradeWatch = false;
+
 function formatTvValue(value) {
   if (value === undefined || value === null || value === "") return "-";
   return String(value).trim();
@@ -811,6 +820,453 @@ app.post("/api/trade-setup", async (req, res) => {
   }
 });
 
+function toWatchNumber(value) {
+  if (value === "" || value === undefined || value === null) return null;
+
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatWatchPrice(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) return "-";
+
+  return Math.round(number).toFixed(2);
+}
+
+function mapTradeWatch(row) {
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    isActive: row.is_active,
+    symbol: row.symbol || "XAUUSD",
+    direction: row.direction || "LONG",
+    entry2: row.entry2,
+    entry3: row.entry3,
+    firstTp: row.first_tp,
+    secondTp: row.second_tp,
+    thirdTp: row.third_tp,
+    slPrice: row.sl_price,
+    activeTp: row.active_tp,
+    sentEntry2: row.sent_entry2,
+    sentEntry3: row.sent_entry3,
+    sentTp: row.sent_tp,
+    sentSl: row.sent_sl,
+    lastPrice: row.last_price,
+    lastCheckedAt: row.last_checked_at,
+    startedAt: row.started_at,
+    stoppedAt: row.stopped_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function sendWatchTelegramMessage(text) {
+  if (!TARGET_CHAT_ID) {
+    throw new Error("TARGET_CHAT_ID가 없습니다.");
+  }
+
+  return telegramApi("sendMessage", {
+    chat_id: TARGET_CHAT_ID,
+    text,
+  });
+}
+
+async function fetchXauUsdPrice() {
+  if (PRICE_PROVIDER !== "goldapi_net") {
+    throw new Error(`지원하지 않는 PRICE_PROVIDER입니다: ${PRICE_PROVIDER}`);
+  }
+
+  if (!GOLD_API_KEY) {
+    throw new Error("GOLD_API_KEY가 Render 환경변수에 없습니다.");
+  }
+
+  const url = `https://app.goldapi.net/price/XAU/USD?x-api-key=${encodeURIComponent(
+    GOLD_API_KEY
+  )}`;
+
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`가격 API 오류: ${response.status} ${body}`);
+  }
+
+  const data = await response.json();
+
+  const price = Number(data.price ?? data.ask ?? data.bid);
+
+  if (!Number.isFinite(price)) {
+    throw new Error("가격 API 응답에서 price 값을 찾지 못했습니다.");
+  }
+
+  return {
+    price,
+    bid: data.bid ?? null,
+    ask: data.ask ?? null,
+    timestamp: data.timestamp ?? null,
+    raw: data,
+  };
+}
+
+function makeEntryReachMessage({ direction, round, entry, tp, sl }) {
+  const isLong = direction === "LONG";
+
+  const header = isLong
+    ? `🟢🟢🟢상승🟢🟢🟢
+🟢🟢🟢상승🟢🟢🟢`
+    : `🔴🔴🔴하락🔴🔴🔴
+🔴🔴🔴하락🔴🔴🔴`;
+
+  const roundLabel = `${round}회차`;
+  const orderLabel =
+    round === 2 ? "1회차 / 2회차" : "1회차 / 2회차 / 3회차";
+  const lot = round === 3 ? "2랏" : "1랏";
+
+  return `${header}
+ 
+- ${roundLabel} 진입가 도달
+- ${roundLabel} 예약매매 진행 안하신분들 매수 진행
+- ${orderLabel} 주문 아래 TP로 수정 부탁드리겠습니다.
+
+XAUUSD(금/GOLD)
+
+📍 ${roundLabel} 진입가 : ${formatWatchPrice(entry)}
+📍 비중 : ${lot}
+
+✅ TP(익절가) : ${formatWatchPrice(tp)} (수정값)
+🛑 SL(손절가) : ${formatWatchPrice(sl)}
+
+※본인 시드에 따라 다르게 적용
+※투자 관련 책임 / 권리는 투자자 본인에게`;
+}
+
+function makeTpReachMessage() {
+  return `✅✅TP(익절가) 도달 완료✅✅
+✅✅TP(익절가) 도달 완료✅✅
+
+모든 회차 정리 진행하겠습니다`;
+}
+
+function makeSlReachMessage() {
+  return `🟥🟥 SL(손절가) 도달 완료🟥🟥
+🟥🟥 SL(손절가) 도달 완료🟥🟥
+
+모든 회차 정리 진행하겠습니다`;
+}
+
+function hasTouchedEntry(direction, price, entry) {
+  if (entry === null) return false;
+
+  if (direction === "LONG") {
+    return price <= entry;
+  }
+
+  return price >= entry;
+}
+
+function hasTouchedTp(direction, price, tp) {
+  if (tp === null) return false;
+
+  if (direction === "LONG") {
+    return price >= tp;
+  }
+
+  return price <= tp;
+}
+
+function hasTouchedSl(direction, price, sl) {
+  if (sl === null) return false;
+
+  if (direction === "LONG") {
+    return price <= sl;
+  }
+
+  return price >= sl;
+}
+
+async function getCurrentTradeSetup() {
+  const db = requireSupabase();
+
+  const { data, error } = await db
+    .from("trade_setups")
+    .select("*")
+    .eq("setup_key", "current")
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data;
+}
+
+async function stopTradeWatchState(reason = "stopped") {
+  const db = requireSupabase();
+
+  const { data, error } = await db
+    .from("trade_watch_state")
+    .update({
+      is_active: false,
+      stopped_at: new Date().toISOString(),
+    })
+    .eq("watch_key", "current")
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data;
+}
+
+app.get("/api/xauusd-price", async (req, res) => {
+  try {
+    const priceData = await fetchXauUsdPrice();
+
+    res.json({
+      ok: true,
+      provider: PRICE_PROVIDER,
+      ...priceData,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.get("/api/trade-watch", async (req, res) => {
+  try {
+    const db = requireSupabase();
+
+    const { data, error } = await db
+      .from("trade_watch_state")
+      .select("*")
+      .eq("watch_key", "current")
+      .maybeSingle();
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      watch: mapTradeWatch(data),
+      pricePollSeconds: PRICE_POLL_SECONDS,
+      provider: PRICE_PROVIDER,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/trade-watch/start", async (req, res) => {
+  try {
+    const db = requireSupabase();
+    const setup = await getCurrentTradeSetup();
+
+    if (!setup) {
+      return res.status(400).json({
+        ok: false,
+        error: "저장된 계산값이 없습니다. 먼저 계산값 저장을 눌러주세요.",
+      });
+    }
+
+    const entry2 = toWatchNumber(setup.entry2);
+    const entry3 = toWatchNumber(setup.entry3);
+    const firstTp = toWatchNumber(setup.first_tp);
+    const secondTp = toWatchNumber(setup.second_tp);
+    const thirdTp = toWatchNumber(setup.third_tp);
+    const slPrice = toWatchNumber(setup.sl_price);
+
+    if (!firstTp || !slPrice) {
+      return res.status(400).json({
+        ok: false,
+        error: "1차 TP와 SL 손절가가 필요합니다.",
+      });
+    }
+
+    const { data, error } = await db
+      .from("trade_watch_state")
+      .upsert(
+        {
+          watch_key: "current",
+          is_active: true,
+          symbol: setup.symbol || "XAUUSD",
+          direction: setup.direction || "LONG",
+          entry2,
+          entry3,
+          first_tp: firstTp,
+          second_tp: secondTp,
+          third_tp: thirdTp,
+          sl_price: slPrice,
+          active_tp: firstTp,
+          sent_entry2: false,
+          sent_entry3: false,
+          sent_tp: false,
+          sent_sl: false,
+          last_price: null,
+          last_checked_at: null,
+          started_at: new Date().toISOString(),
+          stopped_at: null,
+        },
+        {
+          onConflict: "watch_key",
+        }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      message: "자동 감시를 시작했습니다.",
+      watch: mapTradeWatch(data),
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/trade-watch/stop", async (req, res) => {
+  try {
+    const data = await stopTradeWatchState("manual_stop");
+
+    res.json({
+      ok: true,
+      message: "자동 감시를 중지했습니다.",
+      watch: mapTradeWatch(data),
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+async function checkTradeWatchOnce() {
+  if (isCheckingTradeWatch) return;
+
+  isCheckingTradeWatch = true;
+
+  try {
+    const db = requireSupabase();
+
+    const { data: watch, error } = await db
+      .from("trade_watch_state")
+      .select("*")
+      .eq("watch_key", "current")
+      .eq("is_active", true)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!watch) return;
+
+    if (!botEnabled) {
+      return;
+    }
+
+    if (!activeSignal || activeSignal.status !== "진행중") {
+      await stopTradeWatchState("no_active_signal");
+      return;
+    }
+
+    const priceData = await fetchXauUsdPrice();
+    const price = priceData.price;
+    const direction = watch.direction || "LONG";
+
+    const entry2 = toWatchNumber(watch.entry2);
+    const entry3 = toWatchNumber(watch.entry3);
+    const firstTp = toWatchNumber(watch.first_tp);
+    const secondTp = toWatchNumber(watch.second_tp);
+    const thirdTp = toWatchNumber(watch.third_tp);
+    const slPrice = toWatchNumber(watch.sl_price);
+
+    const updates = {
+      last_price: price,
+      last_checked_at: new Date().toISOString(),
+    };
+
+    let activeTp = toWatchNumber(watch.active_tp) || firstTp;
+
+    if (
+      !watch.sent_entry2 &&
+      hasTouchedEntry(direction, price, entry2)
+    ) {
+      await sendWatchTelegramMessage(
+        makeEntryReachMessage({
+          direction,
+          round: 2,
+          entry: entry2,
+          tp: secondTp || firstTp,
+          sl: slPrice,
+        })
+      );
+
+      updates.sent_entry2 = true;
+      updates.active_tp = secondTp || firstTp;
+      activeTp = secondTp || firstTp;
+    }
+
+    if (
+      !watch.sent_entry3 &&
+      hasTouchedEntry(direction, price, entry3)
+    ) {
+      await sendWatchTelegramMessage(
+        makeEntryReachMessage({
+          direction,
+          round: 3,
+          entry: entry3,
+          tp: thirdTp || activeTp,
+          sl: slPrice,
+        })
+      );
+
+      updates.sent_entry3 = true;
+      updates.active_tp = thirdTp || activeTp;
+      activeTp = thirdTp || activeTp;
+    }
+
+    if (
+      !watch.sent_tp &&
+      hasTouchedTp(direction, price, activeTp)
+    ) {
+      await sendWatchTelegramMessage(makeTpReachMessage());
+
+      updates.sent_tp = true;
+      updates.is_active = false;
+      updates.stopped_at = new Date().toISOString();
+    } else if (
+      !watch.sent_sl &&
+      hasTouchedSl(direction, price, slPrice)
+    ) {
+      await sendWatchTelegramMessage(makeSlReachMessage());
+
+      updates.sent_sl = true;
+      updates.is_active = false;
+      updates.stopped_at = new Date().toISOString();
+    }
+
+    const { error: updateError } = await db
+      .from("trade_watch_state")
+      .update(updates)
+      .eq("watch_key", "current");
+
+    if (updateError) throw updateError;
+  } catch (error) {
+    console.error("Trade watch check error:", error.message);
+  } finally {
+    isCheckingTradeWatch = false;
+  }
+}
+
 app.get("/api/status", async (req, res) => {
   try {
     await syncSignalLogsFromDb();
@@ -926,6 +1382,7 @@ app.post("/api/finish-signal", async (req, res) => {
       error: error.message,
     });
   }
+  await stopTradeWatchState("finish_signal");
 });
 
 app.post("/api/lock-position", async (req, res) => {
@@ -1490,5 +1947,10 @@ app.post("/telegram/webhook", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Price watch interval: ${PRICE_POLL_SECONDS}s`);
 });
+
+setInterval(() => {
+  checkTradeWatchOnce();
+}, PRICE_POLL_SECONDS * 1000);
