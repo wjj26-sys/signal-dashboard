@@ -792,6 +792,7 @@ app.post("/api/trade-setup", async (req, res) => {
           entry2: toNullableNumber(payload.entry2),
           entry3: toNullableNumber(payload.entry3),
           tp_gap: toNullableNumber(payload.tpGap),
+          first_tp: toNullableNumber(payload.firstTp),
           second_average: toNullableNumber(payload.secondAverage),
           second_tp: toNullableNumber(payload.secondTp),
           third_average: toNullableNumber(payload.thirdAverage),
