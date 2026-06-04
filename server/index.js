@@ -883,10 +883,10 @@ async function fetchXauUsdPrice() {
     throw new Error("GOLD_API_KEY가 Render 환경변수에 없습니다.");
   }
 
-  const url = `https://app.goldapi.net/price/XAU/USD?x-api-key=${encodeURIComponent(
+  const url = `https://app.goldapi.net/price/XAU?x-api-key=${encodeURIComponent(
     GOLD_API_KEY
   )}`;
-
+  
   const response = await fetch(url);
 
   if (!response.ok) {
