@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
+import SetupChart from "./SetupChart.jsx";
 
 const API_BASE_URL = "https://signal-telegram-server.onrender.com";
-const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "";
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "0529";
 const AUTH_STORAGE_KEY = "signal-dashboard-auth-v1";
 
 const resultOptions = ["수익 🟢", "손절 🔴", "본절 ⚪", "미진입", "진행중"];
@@ -83,8 +84,13 @@ function normalizeServerSignal(item) {
 }
 
 function formatNumber(value) {
-  if (value === "" || value === null || Number.isNaN(Number(value))) return "-";
-  return Number(value).toFixed(1);
+  if (value === "" || value === null || value === undefined) return "-";
+
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) return "-";
+
+  return String(Math.round(number));
 }
 
 function sanitizeAmount(value) {
@@ -113,17 +119,25 @@ function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
   const gap = Number(tpGap);
   const sign = direction === "LONG" ? 1 : -1;
 
-  const secondAverage =
-    Number.isFinite(base) && Number.isFinite(e2)
-      ? (base * 2 + e2) / 3
+  const firstTp =
+    Number.isFinite(base) && Number.isFinite(gap)
+      ? base + sign * gap
       : null;
 
+  // 1차 1랏 + 2차 1랏
+  const secondAverage =
+    Number.isFinite(base) && Number.isFinite(e2)
+      ? (base + e2) / 2
+      : null;
+
+  // 1차 1랏 + 2차 1랏 + 3차 2랏
   const thirdAverage =
     Number.isFinite(base) && Number.isFinite(e2) && Number.isFinite(e3)
-      ? (base * 2 + e2 + e3) / 4
+      ? (base + e2 + e3 * 2) / 4
       : null;
 
   return {
+    firstTp,
     secondAverage,
     secondTp:
       secondAverage !== null && Number.isFinite(gap)
@@ -240,6 +254,11 @@ export default function App() {
   const [selectedArchiveKey, setSelectedArchiveKey] = useState("");
   const [archiveLoading, setArchiveLoading] = useState(false);
 
+  const [showChart, setShowChart] = useState(false);
+  const [setupSaved, setSetupSaved] = useState(false);
+  const [savedTradeSetup, setSavedTradeSetup] = useState(null);
+  const [slPrice, setSlPrice] = useState("");
+
   const currentSignal = signals.find((item) => item.status === "진행중");
   const selectedSignal = signals.find(
     (item) => String(item.id) === String(selectedSignalId)
@@ -268,19 +287,42 @@ export default function App() {
     [direction, baseEntry, entry2, entry3, tpGap]
   );
 
-  const calcText = useMemo(() => {
-    const directionText = direction === "LONG" ? "롱" : "숏";
+  const currentTradeSetup = useMemo(
+    () => ({
+      tradeDate,
+      symbol: tradeSymbol,
+      direction,
+      baseEntry,
+      entry2,
+      entry3,
+      tpGap,
+      firstTp: calc.firstTp === null ? null : Math.round(calc.firstTp),
+      secondAverage: calc.secondAverage,
+      secondTp: calc.secondTp === null ? null : Math.round(calc.secondTp),
+      thirdAverage: calc.thirdAverage,
+      thirdTp: calc.thirdTp === null ? null : Math.round(calc.thirdTp),
+      slPrice,
+    }),
+    [
+      tradeDate,
+      tradeSymbol,
+      direction,
+      baseEntry,
+      entry2,
+      entry3,
+      tpGap,
+      calc,
+      slPrice,
+    ]
+  );
 
-    return `[${tradeSymbol} ${directionText} TP 계산]
+const calcText = useMemo(() => {
+  const directionText = direction === "LONG" ? "롱" : "숏";
 
-기준 진입가: ${baseEntry}
-
-2차 진입가: ${entry2}
+  return `[${tradeSymbol} ${directionText} TP 계산]
 2차 TP: ${formatNumber(calc.secondTp)}
-
-3차 진입가: ${entry3}
 3차 TP: ${formatNumber(calc.thirdTp)}`;
-  }, [tradeSymbol, direction, baseEntry, entry2, entry3, calc]);
+}, [tradeSymbol, direction, calc]);
 
   const fetchServerStatus = async () => {
     try {
@@ -290,6 +332,64 @@ export default function App() {
     } catch (error) {
       console.error("서버 상태 불러오기 실패:", error);
       setServerStatus(null);
+    }
+  };
+
+  const fetchTradeSetup = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/trade-setup`);
+      const data = await response.json();
+
+      if (!data.ok || !data.setup) return;
+
+      const setup = data.setup;
+
+      setSavedTradeSetup(setup);
+
+      if (setup.tradeDate) setTradeDate(setup.tradeDate);
+      if (setup.symbol) setTradeSymbol(setup.symbol);
+      if (setup.direction) setDirection(setup.direction);
+
+      setBaseEntry(setup.baseEntry === null ? "" : String(setup.baseEntry));
+      setEntry2(setup.entry2 === null ? "" : String(setup.entry2));
+      setEntry3(setup.entry3 === null ? "" : String(setup.entry3));
+      setTpGap(setup.tpGap === null ? "" : String(setup.tpGap));
+      setSlPrice(setup.slPrice === null ? "" : String(setup.slPrice));
+    } catch (error) {
+      console.error("계산값 불러오기 실패:", error);
+    }
+  };
+
+  const saveTradeSetup = async () => {
+    if (isUiLocked) return;
+
+    try {
+      setServerLoading(true);
+
+      const response = await fetch(`${API_BASE_URL}/api/trade-setup`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(currentTradeSetup),
+      });
+
+      const data = await response.json();
+
+      if (!data.ok) {
+        alert(data.error || "계산값 저장에 실패했어요.");
+        return;
+      }
+
+      setSavedTradeSetup(data.setup || currentTradeSetup);
+      setSetupSaved(true);
+
+      setTimeout(() => setSetupSaved(false), 1500);
+    } catch (error) {
+      alert("계산값 저장 중 오류가 발생했어요.");
+      console.error(error);
+    } finally {
+      setServerLoading(false);
     }
   };
 
@@ -388,7 +488,10 @@ export default function App() {
       return;
     }
 
-    const range = formatShortRange(selectedArchive.startDate, selectedArchive.endDate);
+    const range = formatShortRange(
+      selectedArchive.startDate,
+      selectedArchive.endDate
+    );
 
     const ok = window.confirm(`${range} 주간 정리본을 삭제할까요?`);
 
@@ -471,6 +574,10 @@ export default function App() {
     }, 10000);
 
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    fetchTradeSetup();
   }, []);
 
   useEffect(() => {
@@ -636,7 +743,7 @@ export default function App() {
         })
       );
 
-     await fetchServerStatus();
+      await fetchServerStatus();
     } catch (error) {
       alert("선택 결과 저장 중 오류가 발생했어요.");
       console.error(error);
@@ -692,6 +799,12 @@ export default function App() {
   };
 
   const handleServerOff = async () => {
+    const ok = window.confirm(
+      "시장가 정리 멘트를 전달방에 보내고 포지션을 종료할까요?"
+    );
+
+    if (!ok) return;
+
     await postServerAction("/api/finish-signal");
     finishCurrentSignal();
   };
@@ -862,11 +975,13 @@ export default function App() {
 
             <div className="button-row">
               <button
-                className={`main-button ${serverStatus?.canReceiveSignal && !isUiLocked ? "active" : ""}`}
+                className={`main-button ${
+                  serverStatus?.canReceiveSignal && !isUiLocked ? "active" : ""
+                }`}
                 onClick={handleServerOn}
                 disabled={serverLoading || isUiLocked}
               >
-                {serverLoading ? "처리중" : "전달 가능"}
+                전달 가능
               </button>
 
               <button
@@ -883,6 +998,14 @@ export default function App() {
                 disabled={serverLoading}
               >
                 {isUiLocked ? "잠금 해제" : "잠금"}
+              </button>
+
+              <button
+                className="sub-button"
+                onClick={() => setShowChart(true)}
+                disabled={serverLoading}
+              >
+                차트보기
               </button>
             </div>
 
@@ -937,12 +1060,22 @@ export default function App() {
             <div className="table-header">
               <div className="section-title">진입가 계산기</div>
 
-              <button
-                className="copy-button"
-                onClick={() => copyText(calcText, setCalcCopied)}
-              >
-                {calcCopied ? "복사완료" : "계산값 복사"}
-              </button>
+              <div className="record-actions">
+                <button
+                  className="copy-button"
+                  onClick={saveTradeSetup}
+                  disabled={serverLoading || isUiLocked}
+                >
+                  {setupSaved ? "저장완료" : "계산값 저장"}
+                </button>
+
+                <button
+                  className="copy-button"
+                  onClick={() => copyText(calcText, setCalcCopied)}
+                >
+                  {calcCopied ? "복사완료" : "계산값 복사"}
+                </button>
+              </div>
             </div>
 
             <div className="form-grid">
@@ -982,7 +1115,7 @@ export default function App() {
 
             <div className="form-grid three">
               <div className="form-field">
-                <label>기준 진입가 / 2랏</label>
+                <label>1차 진입가 / 1랏</label>
                 <input
                   type="number"
                   value={baseEntry}
@@ -1000,7 +1133,7 @@ export default function App() {
               </div>
 
               <div className="form-field">
-                <label>3차 진입가 / 1랏</label>
+                <label>3차 진입가 / 2랏</label>
                 <input
                   type="number"
                   value={entry3}
@@ -1009,7 +1142,24 @@ export default function App() {
               </div>
             </div>
 
-            <div className="calc-result-grid two">
+            <div className="form-field">
+              <label>SL 손절가</label>
+              <input
+                type="number"
+                value={slPrice}
+                onChange={(e) => setSlPrice(e.target.value)}
+                placeholder="예: 4521"
+              />
+            </div>
+
+            <div className="calc-result-grid three">
+              
+              <div className="calc-box">
+                <p>1차 TP</p>
+                <strong>{formatNumber(calc.firstTp)}</strong>
+                <span>1차 진입가 {formatNumber(baseEntry)}</span>
+              </div>
+
               <div className="calc-box">
                 <p>2차 TP</p>
                 <strong>{formatNumber(calc.secondTp)}</strong>
@@ -1024,7 +1174,7 @@ export default function App() {
             </div>
 
             <p className="muted-note">
-              계산식: 기준 진입가는 2랏, 2차와 3차는 1랏 기준입니다. 롱은 평균가 + TP
+              계산식: 1차와 2차는 1랏, 3차는 2랏 기준입니다. 롱은 평균가 + TP
               간격, 숏은 평균가 - TP 간격으로 계산합니다.
             </p>
           </div>
@@ -1127,7 +1277,7 @@ export default function App() {
                   {signals.length === 0 ? (
                     <tr>
                       <td colSpan="7" className="empty-table-cell">
-                         아직 전송된 시그널이 없습니다.
+                        아직 전송된 시그널이 없습니다.
                       </td>
                     </tr>
                   ) : (
@@ -1251,6 +1401,35 @@ export default function App() {
           </div>
         </section>
       </section>
+
+      {showChart && (
+        <div className="chart-modal-backdrop">
+          <div className="chart-modal">
+            <div className="chart-modal-header">
+              <div>
+                <p className="eyebrow">자동선 차트</p>
+                <h2>{tradeSymbol} 포지션 라인</h2>
+              </div>
+
+              <button
+                className="chart-close-button"
+                onClick={() => setShowChart(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="chart-legend">
+              <span className="legend-item sl">파랑: SL 손절</span>
+              <span className="legend-item tp">초록: TP 익절</span>
+              <span className="legend-item entry2">노랑: 2차 진입</span>
+              <span className="legend-item entry3">빨강: 3차 진입</span>
+            </div>
+
+            <SetupChart setup={savedTradeSetup || currentTradeSetup} />
+          </div>
+        </div>
+      )}
     </main>
   );
 }

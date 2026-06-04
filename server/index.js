@@ -504,6 +504,20 @@ async function telegramApi(method, body) {
   return data.result;
 }
 
+async function sendCloseMarketMessage() {
+  if (!TARGET_CHAT_ID) {
+    throw new Error("TARGET_CHAT_ID가 없습니다.");
+  }
+
+  return telegramApi("sendMessage", {
+    chat_id: TARGET_CHAT_ID,
+    text: `✅✅ 시장가 매도 진행 ✅✅
+✅✅ 시장가 매도 진행 ✅✅
+
+모든 회차 정리 진행하겠습니다`,
+  });
+}
+
 async function forwardMessageToTarget(message) {
   if (!TARGET_CHAT_ID) {
     throw new Error("TARGET_CHAT_ID가 Render 환경변수 또는 .env에 없습니다.");
@@ -699,6 +713,200 @@ app.get("/", (req, res) => {
   res.send("Signal server is running.");
 });
 
+function mapTradeSetup(row) {
+  return {
+    id: row.id,
+    tradeDate: row.trade_date || "",
+    symbol: row.symbol || "XAUUSD",
+    direction: row.direction || "LONG",
+    baseEntry: row.base_entry ?? "",
+    entry2: row.entry2 ?? "",
+    entry3: row.entry3 ?? "",
+    tpGap: row.tp_gap ?? "",
+    secondAverage: row.second_average ?? null,
+    secondTp: row.second_tp ?? null,
+    thirdAverage: row.third_average ?? null,
+    thirdTp: row.third_tp ?? null,
+    slPrice: row.sl_price ?? "",
+    updatedAt: row.updated_at,
+  };
+}
+
+function toNullableNumber(value) {
+  if (value === "" || value === undefined || value === null) return null;
+
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : null;
+}
+
+app.get("/api/trade-setup", async (req, res) => {
+  try {
+    const db = requireSupabase();
+
+    const { data, error } = await db
+      .from("trade_setups")
+      .select("*")
+      .eq("setup_key", "current")
+      .maybeSingle();
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      setup: data ? mapTradeSetup(data) : null,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/trade-setup", async (req, res) => {
+  try {
+    const db = requireSupabase();
+
+    const payload = req.body || {};
+
+    const { data, error } = await db
+      .from("trade_setups")
+      .upsert(
+        {
+          setup_key: "current",
+          trade_date: payload.tradeDate || getTodayLogDate(),
+          symbol: payload.symbol || "XAUUSD",
+          direction: payload.direction || "LONG",
+          base_entry: toNullableNumber(payload.baseEntry),
+          entry2: toNullableNumber(payload.entry2),
+          entry3: toNullableNumber(payload.entry3),
+          tp_gap: toNullableNumber(payload.tpGap),
+          second_average: toNullableNumber(payload.secondAverage),
+          second_tp: toNullableNumber(payload.secondTp),
+          third_average: toNullableNumber(payload.thirdAverage),
+          third_tp: toNullableNumber(payload.thirdTp),
+          sl_price: toNullableNumber(payload.slPrice),
+        },
+        {
+          onConflict: "setup_key",
+        }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      message: "계산값을 저장했습니다.",
+      setup: mapTradeSetup(data),
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+function mapTradeSetup(row) {
+  return {
+    id: row.id,
+    tradeDate: row.trade_date || "",
+    symbol: row.symbol || "XAUUSD",
+    direction: row.direction || "LONG",
+    baseEntry: row.base_entry ?? "",
+    entry2: row.entry2 ?? "",
+    entry3: row.entry3 ?? "",
+    tpGap: row.tp_gap ?? "",
+    secondAverage: row.second_average ?? null,
+    secondTp: row.second_tp ?? null,
+    thirdAverage: row.third_average ?? null,
+    thirdTp: row.third_tp ?? null,
+    slPrice: row.sl_price ?? "",
+    updatedAt: row.updated_at,
+  };
+}
+
+function toNullableNumber(value) {
+  if (value === "" || value === undefined || value === null) return null;
+
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : null;
+}
+
+app.get("/api/trade-setup", async (req, res) => {
+  try {
+    const db = requireSupabase();
+
+    const { data, error } = await db
+      .from("trade_setups")
+      .select("*")
+      .eq("setup_key", "current")
+      .maybeSingle();
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      setup: data ? mapTradeSetup(data) : null,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/trade-setup", async (req, res) => {
+  try {
+    const db = requireSupabase();
+
+    const payload = req.body || {};
+
+    const { data, error } = await db
+      .from("trade_setups")
+      .upsert(
+        {
+          setup_key: "current",
+          trade_date: payload.tradeDate || getTodayLogDate(),
+          symbol: payload.symbol || "XAUUSD",
+          direction: payload.direction || "LONG",
+          base_entry: toNullableNumber(payload.baseEntry),
+          entry2: toNullableNumber(payload.entry2),
+          entry3: toNullableNumber(payload.entry3),
+          tp_gap: toNullableNumber(payload.tpGap),
+          second_average: toNullableNumber(payload.secondAverage),
+          second_tp: toNullableNumber(payload.secondTp),
+          third_average: toNullableNumber(payload.thirdAverage),
+          third_tp: toNullableNumber(payload.thirdTp),
+          sl_price: toNullableNumber(payload.slPrice),
+        },
+        {
+          onConflict: "setup_key",
+        }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      message: "계산값을 저장했습니다.",
+      setup: mapTradeSetup(data),
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
 app.get("/api/status", async (req, res) => {
   try {
     await syncSignalLogsFromDb();
@@ -786,6 +994,10 @@ app.post("/api/manual-off", async (req, res) => {
 
 app.post("/api/finish-signal", async (req, res) => {
   try {
+    if (activeSignal && activeSignal.status === "진행중") {
+      await sendCloseMarketMessage();
+    }
+
     await syncSignalLogsFromDb();
     await finishActiveSignalLog();
 
