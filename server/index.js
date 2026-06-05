@@ -1507,6 +1507,18 @@ async function checkTradeWatchOnce() {
     if (updateError) throw updateError;
   } catch (error) {
     console.error("Trade watch check error:", error.message);
+
+    if (
+      PRICE_PROVIDER === "vantage_mt5" &&
+      String(error.message || "").includes("Vantage MT5 가격 수신이 끊겼습니다")
+    ) {
+      try {
+        await stopTradeWatchState("vantage_price_stale");
+        console.log("Vantage MT5 가격 수신 끊김으로 자동 감시를 중지했습니다.");
+      } catch (stopError) {
+        console.error("자동 감시 중지 실패:", stopError.message);
+      }
+    }
   } finally {
     isCheckingTradeWatch = false;
   }
