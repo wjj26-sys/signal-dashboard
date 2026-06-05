@@ -19,6 +19,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const SOURCE_CHAT_ID = process.env.SOURCE_CHAT_ID;
 const SOURCE_CHAT_ID_2 = process.env.SOURCE_CHAT_ID_2;
 const TARGET_CHAT_ID = process.env.TARGET_CHAT_ID;
+const VANTAGE_TICK_TOKEN = process.env.VANTAGE_TICK_TOKEN || "";
 const PORT = process.env.PORT || 4000;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -876,6 +877,34 @@ async function sendWatchTelegramMessage(text) {
 }
 
 async function fetchXauUsdPrice() {
+  if (PRICE_PROVIDER === "vantage_mt5") {
+    const db = requireSupabase();
+
+    const { data, error } = await db
+      .from("xauusd_price_ticks")
+      .select("*")
+      .eq("symbol", "XAUUSD")
+      .eq("provider", "vantage_mt5")
+      .order("checked_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      throw new Error("Vantage MT5 가격 기록이 아직 없습니다.");
+    }
+
+    return {
+      price: Number(data.price),
+      bid: data.bid,
+      ask: data.ask,
+      timestamp: data.checked_at,
+      raw: data,
+      latestTick: mapPriceTick(data),
+    };
+  }
+
   if (PRICE_PROVIDER === "gold_api_free") {
     const url = "https://api.gold-api.com/price/XAU";
 
@@ -1106,7 +1135,11 @@ async function stopTradeWatchState(reason = "stopped") {
 app.get("/api/xauusd-price", async (req, res) => {
   try {
     const priceData = await fetchXauUsdPrice();
-    const savedTick = await saveXauUsdPriceTick(priceData, "manual");
+
+    const savedTick =
+      PRICE_PROVIDER === "vantage_mt5"
+       ? priceData.latestTick || null
+       : await saveXauUsdPriceTick(priceData, "manual");
 
     res.json({
       ok: true,
@@ -1122,16 +1155,93 @@ app.get("/api/xauusd-price", async (req, res) => {
   }
 });
 
+app.post("/api/vantage-tick", async (req, res) => {
+  try {
+    if (!VANTAGE_TICK_TOKEN) {
+      return res.status(500).json({
+        ok: false,
+        error: "VANTAGE_TICK_TOKEN이 Render 환경변수에 없습니다.",
+      });
+    }
+
+    const token = req.headers["x-vantage-token"] || req.body?.token || "";
+
+    if (token !== VANTAGE_TICK_TOKEN) {
+      return res.status(401).json({
+        ok: false,
+        error: "인증 토큰이 올바르지 않습니다.",
+      });
+    }
+
+    const bid = toNullableNumber(req.body?.bid);
+    const ask = toNullableNumber(req.body?.ask);
+    const last = toNullableNumber(req.body?.last);
+    const receivedPrice = toNullableNumber(req.body?.price);
+
+    const price =
+      receivedPrice ??
+      last ??
+      (bid !== null && ask !== null ? (bid + ask) / 2 : null) ??
+      bid ??
+      ask;
+
+    if (price === null) {
+      return res.status(400).json({
+        ok: false,
+        error: "price, bid, ask 중 최소 1개는 필요합니다.",
+      });
+    }
+
+    const checkedAt = req.body?.time
+      ? new Date(req.body.time).toISOString()
+      : new Date().toISOString();
+
+    const db = requireSupabase();
+
+    const { data, error } = await db
+      .from("xauusd_price_ticks")
+      .insert({
+        symbol: "XAUUSD",
+        price,
+        bid,
+        ask,
+        provider: "vantage_mt5",
+        source: "mt5",
+        checked_at: checkedAt,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      tick: mapPriceTick(data),
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
 app.get("/api/xauusd-history", async (req, res) => {
   try {
     const db = requireSupabase();
 
     const limit = Math.min(Number(req.query.limit || 240), 1000);
 
-    const { data, error } = await db
+    let query = db
       .from("xauusd_price_ticks")
       .select("*")
-      .eq("symbol", "XAUUSD")
+      .eq("symbol", "XAUUSD");
+
+    if (PRICE_PROVIDER) {
+      query = query.eq("provider", PRICE_PROVIDER);
+    }
+
+    const { data, error } = await query
       .order("checked_at", { ascending: false })
       .limit(limit);
 
@@ -1293,9 +1403,13 @@ async function checkTradeWatchOnce() {
     }
 
     const priceData = await fetchXauUsdPrice();
-    await saveXauUsdPriceTick(priceData, "watch");
+
+    if (PRICE_PROVIDER !== "vantage_mt5") {
+      await saveXauUsdPriceTick(priceData, "watch");
+    }
 
     const price = priceData.price;
+
     const direction = watch.direction || "LONG";
 
     const entry2 = toWatchNumber(watch.entry2);
@@ -1476,6 +1590,7 @@ app.post("/api/finish-signal", async (req, res) => {
 
     await syncSignalLogsFromDb();
     await finishActiveSignalLog();
+    await stopTradeWatchState("finish_signal");
 
     signalRunning = false;
     activeSignal = null;
@@ -1498,7 +1613,6 @@ app.post("/api/finish-signal", async (req, res) => {
       error: error.message,
     });
   }
-  await stopTradeWatchState("finish_signal");
 });
 
 app.post("/api/lock-position", async (req, res) => {
