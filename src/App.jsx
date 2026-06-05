@@ -452,14 +452,15 @@ const calcText = useMemo(() => {
       }
 
       appendPriceTick(
-        data.savedTick || {
-          price: data.price,
-          bid: data.bid,
-          ask: data.ask,
-          provider: data.provider,
-          checkedAt: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-        }
+        data.savedTick ||
+          data.latestTick || {
+            price: data.price,
+            bid: data.bid,
+            ask: data.ask,
+            provider: data.provider,
+            checkedAt: data.timestamp || new Date().toISOString(),
+            createdAt: data.timestamp || new Date().toISOString(),
+          }
       );
     } catch (error) {
       console.error("최신 가격 불러오기 오류:", error);
@@ -751,6 +752,19 @@ const calcText = useMemo(() => {
 
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!showChart) return;
+
+    fetchInitialPriceHistory();
+    fetchLatestPriceTick();
+
+    const timer = setInterval(() => {
+      fetchLatestPriceTick();
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [showChart]);
 
   useEffect(() => {
     fetchPositionRecords();
