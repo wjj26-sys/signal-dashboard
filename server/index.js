@@ -549,6 +549,11 @@ const PRICE_POLL_SECONDS = Math.max(
   Number(process.env.PRICE_POLL_SECONDS || 600)
 );
 
+const VANTAGE_MAX_STALE_SECONDS = Math.max(
+  10,
+  Number(process.env.VANTAGE_MAX_STALE_SECONDS || 60)
+);
+
 let isCheckingTradeWatch = false;
 
 function formatTvValue(value) {
@@ -895,11 +900,21 @@ async function fetchXauUsdPrice() {
       throw new Error("Vantage MT5 가격 기록이 아직 없습니다.");
     }
 
+    const checkedAtTime = new Date(data.checked_at).getTime();
+    const ageSeconds = Math.floor((Date.now() - checkedAtTime) / 1000);
+
+    if (!Number.isFinite(checkedAtTime) || ageSeconds > VANTAGE_MAX_STALE_SECONDS) {
+      throw new Error(
+        `Vantage MT5 가격 수신이 끊겼습니다. 마지막 수신: ${ageSeconds}초 전`
+      );
+    }
+
     return {
       price: Number(data.price),
       bid: data.bid,
       ask: data.ask,
       timestamp: data.checked_at,
+      ageSeconds,
       raw: data,
       latestTick: mapPriceTick(data),
     };
