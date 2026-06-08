@@ -1572,12 +1572,18 @@ async function checkTradeWatchOnce(options = {}) {
       shouldFinishPosition = true;
     }
 
-    const { error: updateError } = await db
-      .from("trade_watch_state")
-      .update(updates)
-      .eq("watch_key", "current");
+    if (shouldFinishPosition) {
+      await stopTradeWatchState("tp_sl_auto_finish");
+      await finishActiveSignalLog();
 
-    if (updateError) throw updateError;
+      signalRunning = false;
+      activeSignal = null;
+      botEnabled = true;
+
+      await syncSignalLogsFromDb();
+
+      console.log("TP/SL 도달로 자동 감시 중지 및 포지션 종료 완료");
+    }
 
     if (shouldFinishPosition) {
       await finishActiveSignalLog();
