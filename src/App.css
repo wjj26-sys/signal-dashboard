@@ -1189,3 +1189,107 @@ textarea:focus {
   font-weight: 900;
   color: #0f172a;
 }
+
+/* ==============================
+   FINAL LAYOUT PATCH
+   - TP 카드 설명 문구 숨김
+   - TP 카드 높이 축소
+   - 포지션 기록기 위치 상향
+   ============================== */
+
+/* 데스크탑 배치: 포지션 기록기를 포지션 선택 패널 바로 아래로 올림 */
+.right-panel {
+  grid-template-columns: minmax(390px, 1fr) 300px 300px !important;
+  grid-template-areas:
+    "calc position archive"
+    "calc record archive"
+    "signal signal archive" !important;
+  align-items: start !important;
+}
+
+/* TP 결과 카드: 아래 진입가/평균가 설명 숨기고 카드 짧게 */
+.calc-result-grid {
+  gap: 10px !important;
+  margin-top: 12px !important;
+}
+
+.calc-result-grid .calc-box {
+  min-height: 92px !important;
+  padding: 14px 10px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 18px !important;
+}
+
+.calc-result-grid .calc-box p {
+  margin: 0 0 7px !important;
+  font-size: 12px !important;
+}
+
+.calc-result-grid .calc-box strong {
+  font-size: 30px !important;
+  line-height: 1 !important;
+  letter-spacing: -0.06em !important;
+}
+
+/* App.jsx에서 span을 아직 지우지 못했어도 화면에서는 안 보이게 처리 */
+.calc-result-grid .calc-box span {
+  display: none !important;
+}
+
+/* 포지션 기록기 카드 간격 정리 */
+.record-card {
+  grid-area: record !important;
+  align-self: start !important;
+}
+
+.record-card textarea {
+  min-height: 260px !important;
+}
+
+.position-card {
+  grid-area: position !important;
+  align-self: start !important;
+}
+
+.signal-card {
+  grid-area: signal !important;
+  align-self: start !important;
+}
+
+/* 포지션 선택 패널과 기록기 사이 간격 */
+.position-card + .record-card,
+.record-card {
+  margin-top: 0 !important;
+}
+
+/* 중간 화면에서도 기록기가 포지션 선택 패널 아래로 오게 정리 */
+@media (max-width: 1420px) {
+  .right-panel {
+    grid-template-columns: minmax(0, 1fr) 300px !important;
+    grid-template-areas:
+      "calc position"
+      "calc record"
+      "signal signal"
+      "archive archive" !important;
+  }
+}
+
+/* 모바일/좁은 화면 순서: 계산기 → 포지션 선택 → 포지션 기록기 → 전송된 시그널 → 저장함 */
+@media (max-width: 980px) {
+  .right-panel {
+    grid-template-columns: 1fr !important;
+    grid-template-areas:
+      "calc"
+      "position"
+      "record"
+      "signal"
+      "archive" !important;
+  }
+
+  .record-card textarea {
+    min-height: 240px !important;
+  }
+}

@@ -1594,19 +1594,16 @@ const calcText = useMemo(() => {
               <div className="calc-box">
                 <p>1차 TP</p>
                 <strong>{formatNumber(calc.firstTp)}</strong>
-                <span>1차 진입가 {formatNumber(baseEntry)}</span>
               </div>
 
               <div className="calc-box">
                 <p>2차 TP</p>
                 <strong>{formatNumber(calc.secondTp)}</strong>
-                <span>평균가 {formatNumber(calc.secondAverage)}</span>
               </div>
 
               <div className="calc-box">
                 <p>3차 TP</p>
                 <strong>{formatNumber(calc.thirdTp)}</strong>
-                <span>평균가 {formatNumber(calc.thirdAverage)}</span>
               </div>
             </div>
 
@@ -1688,6 +1685,35 @@ const calcText = useMemo(() => {
             )}
           </div>
 
+          <div className="card record-card">
+            <div className="table-header">
+              <div className="section-title">포지션 기록기</div>
+
+              <div className="record-actions">
+                <button
+                  className="copy-button"
+                  onClick={savePositionRecord}
+                  disabled={archiveLoading || isUiLocked}
+                >
+                  {isUiLocked ? "잠금중" : saved ? "저장완료" : "저장"}
+                </button>
+
+                <button
+                  className="copy-button"
+                  onClick={() => copyText(positionText, setCopied)}
+                >
+                  {copied ? "복사완료" : "복사하기"}
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              value={positionText}
+              readOnly
+              placeholder="포지션 기록이 생성되면 여기에 표시됩니다."
+            />
+          </div>
+
           <div className={`card signal-card lockable-card ${isUiLocked ? "is-locked" : ""}`}>
             {isUiLocked && <div className="lock-overlay">잠금중</div>}
 
@@ -1749,35 +1775,6 @@ const calcText = useMemo(() => {
                 </tbody>
               </table>
             </div>
-          </div>
-
-          <div className="card record-card">
-            <div className="table-header">
-              <div className="section-title">포지션 기록기</div>
-
-              <div className="record-actions">
-                <button
-                  className="copy-button"
-                  onClick={savePositionRecord}
-                  disabled={archiveLoading || isUiLocked}
-                >
-                  {isUiLocked ? "잠금중" : saved ? "저장완료" : "저장"}
-                </button>
-
-                <button
-                  className="copy-button"
-                  onClick={() => copyText(positionText, setCopied)}
-                >
-                  {copied ? "복사완료" : "복사하기"}
-                </button>
-              </div>
-            </div>
-
-            <textarea
-              value={positionText}
-              readOnly
-              placeholder="포지션 기록이 생성되면 여기에 표시됩니다."
-            />
           </div>
 
           <div className="archive-column">
