@@ -1190,106 +1190,198 @@ textarea:focus {
   color: #0f172a;
 }
 
-/* ==============================
-   FINAL LAYOUT PATCH
-   - TP 카드 설명 문구 숨김
-   - TP 카드 높이 축소
-   - 포지션 기록기 위치 상향
-   ============================== */
+/* ================================
+   FINAL LAYOUT FIX
+   - 전송된 시그널을 진입가 계산기 바로 아래로 배치
+   - 전송된 시그널 카드 크기 축소
+   - TP 카드 하단 설명 숨김 및 카드 높이 축소
+   ================================ */
 
-/* 데스크탑 배치: 포지션 기록기를 포지션 선택 패널 바로 아래로 올림 */
-.right-panel {
-  grid-template-columns: minmax(390px, 1fr) 300px 300px !important;
-  grid-template-areas:
-    "calc position archive"
-    "calc record archive"
-    "signal signal archive" !important;
-  align-items: start !important;
-}
-
-/* TP 결과 카드: 아래 진입가/평균가 설명 숨기고 카드 짧게 */
+/* TP 카드: 진입가/평균가 문구 숨기고 박스 짧게 */
 .calc-result-grid {
   gap: 10px !important;
   margin-top: 12px !important;
 }
 
-.calc-result-grid .calc-box {
-  min-height: 92px !important;
-  padding: 14px 10px !important;
+.calc-box {
+  min-height: 88px !important;
+  padding: 13px 10px !important;
   display: flex !important;
   flex-direction: column !important;
   align-items: center !important;
   justify-content: center !important;
-  border-radius: 18px !important;
 }
 
-.calc-result-grid .calc-box p {
+.calc-box p {
   margin: 0 0 7px !important;
   font-size: 12px !important;
 }
 
-.calc-result-grid .calc-box strong {
-  font-size: 30px !important;
-  line-height: 1 !important;
-  letter-spacing: -0.06em !important;
+.calc-box strong {
+  font-size: 25px !important;
+  line-height: 1.05 !important;
 }
 
-/* App.jsx에서 span을 아직 지우지 못했어도 화면에서는 안 보이게 처리 */
-.calc-result-grid .calc-box span {
+.calc-box span {
   display: none !important;
 }
 
-/* 포지션 기록기 카드 간격 정리 */
-.record-card {
-  grid-area: record !important;
-  align-self: start !important;
-}
-
-.record-card textarea {
-  min-height: 260px !important;
-}
-
-.position-card {
-  grid-area: position !important;
-  align-self: start !important;
-}
-
-.signal-card {
-  grid-area: signal !important;
-  align-self: start !important;
-}
-
-/* 포지션 선택 패널과 기록기 사이 간격 */
-.position-card + .record-card,
-.record-card {
-  margin-top: 0 !important;
-}
-
-/* 중간 화면에서도 기록기가 포지션 선택 패널 아래로 오게 정리 */
-@media (max-width: 1420px) {
+/* 데스크톱: archive 컬럼이 row 높이를 밀지 않도록 absolute 처리 */
+@media (min-width: 1421px) {
   .right-panel {
-    grid-template-columns: minmax(0, 1fr) 300px !important;
+    position: relative !important;
+    display: grid !important;
+    grid-template-columns: minmax(390px, 1fr) 300px !important;
     grid-template-areas:
       "calc position"
-      "calc record"
-      "signal signal"
-      "archive archive" !important;
+      "signal record" !important;
+    gap: 12px 16px !important;
+    align-items: start !important;
+    padding-right: 316px !important;
+  }
+
+  .calc-card {
+    grid-area: calc !important;
+  }
+
+  .position-card {
+    grid-area: position !important;
+  }
+
+  .signal-card {
+    grid-area: signal !important;
+  }
+
+  .record-card {
+    grid-area: record !important;
+  }
+
+  .archive-column {
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
+    width: 300px !important;
+    grid-area: unset !important;
   }
 }
 
-/* 모바일/좁은 화면 순서: 계산기 → 포지션 선택 → 포지션 기록기 → 전송된 시그널 → 저장함 */
+/* 전송된 시그널 카드: 작고 촘촘하게 */
+.signal-card {
+  padding: 14px !important;
+  align-self: start !important;
+}
+
+.signal-card .table-header {
+  margin-bottom: 10px !important;
+}
+
+.signal-card .section-title {
+  font-size: 17px !important;
+}
+
+.signal-card .count-pill {
+  padding: 6px 10px !important;
+  font-size: 11px !important;
+}
+
+.signal-table-wrap {
+  max-height: 235px !important;
+  overflow: auto !important;
+  border-radius: 15px !important;
+}
+
+.signal-table {
+  min-width: 620px !important;
+}
+
+.signal-table th,
+.signal-table td {
+  padding: 9px 8px !important;
+  font-size: 12px !important;
+  line-height: 1.25 !important;
+}
+
+.signal-table th:nth-child(1),
+.signal-table td:nth-child(1) {
+  width: 70px !important;
+}
+
+.signal-table th:nth-child(2),
+.signal-table td:nth-child(2) {
+  width: 125px !important;
+}
+
+.signal-table th:nth-child(3),
+.signal-table td:nth-child(3),
+.signal-table th:nth-child(4),
+.signal-table td:nth-child(4) {
+  width: 70px !important;
+}
+
+.signal-table th:nth-child(5),
+.signal-table td:nth-child(5) {
+  width: 150px !important;
+}
+
+.signal-table th:nth-child(6),
+.signal-table td:nth-child(6) {
+  width: 70px !important;
+}
+
+.signal-table th:nth-child(7),
+.signal-table td:nth-child(7) {
+  width: 65px !important;
+}
+
+.signal-table .mini-status {
+  padding: 5px 8px !important;
+  font-size: 10px !important;
+}
+
+.signal-table .delete-mini-button {
+  min-width: 46px !important;
+  height: 26px !important;
+  padding: 0 8px !important;
+  font-size: 11px !important;
+}
+
+/* 포지션 기록기도 너무 길어지지 않게 */
+.record-card textarea {
+  min-height: 250px !important;
+  max-height: 330px !important;
+}
+
+/* 1420px 이하에서는 absolute 해제하고 일반 그리드로 복귀 */
+@media (max-width: 1420px) {
+  .right-panel {
+    position: static !important;
+    padding-right: 0 !important;
+    grid-template-columns: minmax(0, 1fr) 300px !important;
+    grid-template-areas:
+      "calc position"
+      "signal record"
+      "archive archive" !important;
+  }
+
+  .archive-column {
+    position: static !important;
+    width: 100% !important;
+    grid-area: archive !important;
+  }
+}
+
 @media (max-width: 980px) {
   .right-panel {
     grid-template-columns: 1fr !important;
     grid-template-areas:
       "calc"
       "position"
-      "record"
       "signal"
+      "record"
       "archive" !important;
   }
 
-  .record-card textarea {
-    min-height: 240px !important;
+  .signal-table-wrap {
+    max-height: 260px !important;
   }
 }
