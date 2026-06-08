@@ -1560,3 +1560,20 @@ textarea:focus {
 .position-card > .muted-note:not(.selected-note) {
   display: none;
 }
+
+/* 미니 관리자 제목 글자 크기 줄이기 */
+.admin-card h1 {
+  font-size: 20px;
+}
+
+/* 포지션 기록기 제목 글자 크기 줄이기 */
+.record-card .section-title {
+  font-size: 16px;
+}
+
+/* 포지션 기록기 저장 / 복사하기 버튼 글자 크기 줄이기 */
+.record-card .copy-button {
+  font-size: 12px;
+  height: 40px;
+  padding: 0 13px;
+}
