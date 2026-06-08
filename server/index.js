@@ -1509,6 +1509,7 @@ async function checkTradeWatchOnce(options = {}) {
       last_checked_at: new Date().toISOString(),
     };
 
+    let shouldFinishPosition = false;
     let activeTp = toWatchNumber(watch.active_tp) || firstTp;
 
     if (
@@ -1558,6 +1559,7 @@ async function checkTradeWatchOnce(options = {}) {
       updates.sent_tp = true;
       updates.is_active = false;
       updates.stopped_at = new Date().toISOString();
+      shouldFinishPosition = true;
     } else if (
       !watch.sent_sl &&
       hasTouchedSl(direction, price, slPrice)
@@ -1567,6 +1569,7 @@ async function checkTradeWatchOnce(options = {}) {
       updates.sent_sl = true;
       updates.is_active = false;
       updates.stopped_at = new Date().toISOString();
+      shouldFinishPosition = true;
     }
 
     const { error: updateError } = await db
@@ -1575,6 +1578,18 @@ async function checkTradeWatchOnce(options = {}) {
       .eq("watch_key", "current");
 
     if (updateError) throw updateError;
+
+    if (shouldFinishPosition) {
+      await finishActiveSignalLog();
+
+      signalRunning = false;
+      activeSignal = null;
+      botEnabled = true;
+
+      await syncSignalLogsFromDb();
+
+      console.log("TP/SL 도달로 포지션을 자동 종료했습니다.");
+    }
   } catch (error) {
     console.error("Trade watch check error:", error.message);
 
