@@ -417,7 +417,7 @@ const calcText = useMemo(() => {
             new Date(a.checkedAt || a.createdAt).getTime() -
             new Date(b.checkedAt || b.createdAt).getTime()
         )
-        .slice(-1000);
+        .slice(-20000);
     });
   };
 
