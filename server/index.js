@@ -1598,11 +1598,16 @@ app.get("/api/status", async (req, res) => {
   try {
     await syncSignalLogsFromDb();
 
+    const scheduleState = getAutoScheduleState();
+
     res.json({
       botEnabled,
-      operatingTime: isOperatingTime(),
+      operatingTime: scheduleState.isOpen,
+      scheduleOpen: scheduleState.isOpen,
+      scheduleStatus: scheduleState.statusText,
+      scheduleReason: scheduleState.reason,
       signalRunning,
-      canReceiveSignal: botEnabled && !signalRunning,
+      canReceiveSignal: botEnabled && scheduleState.isOpen && !signalRunning,
       testMode,
       activeSignal,
       sentSignals,
