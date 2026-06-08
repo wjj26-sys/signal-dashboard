@@ -166,6 +166,14 @@ function toProfitNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function formatDollarAmount(amount) {
+  const rounded = Math.round(Number(amount) || 0);
+  const sign = rounded < 0 ? "-" : "+";
+  const absolute = Math.abs(rounded).toLocaleString();
+
+  return `${sign}$${absolute}`;
+}
+
 function getResultValue(amount, forceLoss = false) {
   if (forceLoss) return "손절 🔴";
   if (amount > 0) return "수익 🟢";
@@ -195,11 +203,28 @@ function calculateSinglePositionProfit({ direction, entryPrice, exitPrice, lot }
 function getTpByRound(setup, round) {
   if (Number(round) === 1) return setup?.firstTp;
   if (Number(round) === 2) return setup?.secondTp || setup?.firstTp;
+
   if (Number(round) === 3) {
     return setup?.thirdTp || setup?.secondTp || setup?.firstTp;
   }
 
   return setup?.firstTp;
+}
+
+function getEntryByRound(setup, round) {
+  if (Number(round) === 1) return setup?.baseEntry;
+  if (Number(round) === 2) return setup?.entry2;
+  if (Number(round) === 3) return setup?.entry3;
+
+  return null;
+}
+
+function getRoundNumberFromText(roundText) {
+  if (String(roundText).includes("1")) return 1;
+  if (String(roundText).includes("2")) return 2;
+  if (String(roundText).includes("3")) return 3;
+
+  return 1;
 }
 
 function buildAutoPositionDraft({
@@ -430,14 +455,14 @@ export default function App() {
     ]
   );
 
-const latestXauusdPrice = useMemo(() => {
-  const watchPrice = toProfitNumber(watchStatus?.watch?.lastPrice);
+  const latestXauusdPrice = useMemo(() => {
+    const watchPrice = toProfitNumber(watchStatus?.watch?.lastPrice);
 
-  if (watchPrice !== null) return watchPrice;
+    if (watchPrice !== null) return watchPrice;
 
-  const latestTick = priceHistory[priceHistory.length - 1];
-  return toProfitNumber(latestTick?.price);
-}, [watchStatus, priceHistory]);
+    const latestTick = priceHistory[priceHistory.length - 1];
+    return toProfitNumber(latestTick?.price);
+  }, [watchStatus, priceHistory]);
 
 const calcText = useMemo(() => {
   const directionText = direction === "LONG" ? "롱" : "숏";
@@ -1009,62 +1034,63 @@ const calcText = useMemo(() => {
     );
   };
 
-  const applyAutoResult = async (round, type) => {
+  const handlePositionResultChange = (index, selectedResult) => {
     if (isUiLocked) return;
 
     const setup = savedTradeSetup || currentTradeSetup;
+    const clickedRound = index + 1;
+
+    if (selectedResult === "미진입" || selectedResult === "진행중") {
+      setPositionDraft((prev) =>
+        prev.map((item, itemIndex) =>
+          itemIndex === index
+            ? {
+                ...item,
+                result: selectedResult,
+                amount: "",
+              }
+            : item
+        )
+      );
+      return;
+    }
 
     let exitPrice = null;
     let forceLoss = false;
+    let enteredRound = clickedRound;
 
-    if (type === "profit") {
-      exitPrice = getTpByRound(setup, round);
+    if (selectedResult.includes("수익")) {
+      exitPrice = getTpByRound(setup, clickedRound);
+      enteredRound = clickedRound;
     }
 
-    if (type === "loss") {
+    if (selectedResult.includes("손절")) {
       exitPrice = setup?.slPrice;
       forceLoss = true;
+      enteredRound = clickedRound;
     }
 
-    if (type === "market") {
-      exitPrice = latestXauusdPrice;
+    if (selectedResult.includes("보합")) {
+      exitPrice = getEntryByRound(setup, clickedRound);
 
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/xauusd-price`);
-        const data = await response.json();
+      const highestEnteredRound = positionDraft.reduce((max, item) => {
+        if (item.result === "미진입") return max;
 
-        if (data.ok && toProfitNumber(data.price) !== null) {
-          exitPrice = data.price;
-          appendPriceTick(
-            data.savedTick ||
-              data.latestTick || {
-                price: data.price,
-                bid: data.bid,
-                ask: data.ask,
-                provider: data.provider,
-                checkedAt: data.timestamp || new Date().toISOString(),
-                createdAt: data.timestamp || new Date().toISOString(),
-              }
-          );
-        }
-      } catch (error) {
-        console.error("시장가 조회 실패:", error);
-      }
+        return Math.max(max, getRoundNumberFromText(item.round));
+      }, clickedRound);
+
+      enteredRound = highestEnteredRound;
     }
 
     if (toProfitNumber(exitPrice) === null) {
-      alert(
-        type === "market"
-          ? "현재 시장가를 아직 불러오지 못했어요."
-          : "계산에 필요한 가격값이 없습니다."
-      );
+      alert("계산에 필요한 가격값이 없습니다.");
       return;
     }
 
     setPositionDraft(
       buildAutoPositionDraft({
         setup,
-        enteredRound: round,
+        enteredRound,
         exitPrice,
         forceLoss,
       })
@@ -1600,39 +1626,6 @@ const calcText = useMemo(() => {
               여기서 직접 선택합니다.
             </p>
 
-            <div className="watch-actions auto-result-actions">
-              {[1, 2, 3].map((round) => (
-                <React.Fragment key={round}>
-                  <button
-                    className="copy-button"
-                    type="button"
-                    onClick={() => applyAutoResult(round, "profit")}
-                    disabled={isUiLocked}
-                  >
-                    {round}차 수익
-                  </button>
-
-                  <button
-                    className="copy-button light"
-                    type="button"
-                    onClick={() => applyAutoResult(round, "loss")}
-                    disabled={isUiLocked}
-                  >
-                    {round}차 손절
-                  </button>
-
-                  <button
-                    className="copy-button light"
-                    type="button"
-                    onClick={() => applyAutoResult(round, "market")}
-                    disabled={isUiLocked}
-                  >
-                    {round}차 시장가
-                  </button>
-                </React.Fragment>
-              ))}
-            </div>
-
             <div className="form-field position-select">
               <label>기록 적용할 시그널</label>
               <select value={selectedSignalId} onChange={handleSelectSignal}>
@@ -1656,7 +1649,7 @@ const calcText = useMemo(() => {
                   <label>결과 선택</label>
                   <select
                     value={position.result}
-                    onChange={(e) => updateDraft(index, "result", e.target.value)}
+                    onChange={(e) => handlePositionResultChange(index, e.target.value)}
                   >
                     {resultOptions.map((option) => (
                       <option key={option} value={option}>
