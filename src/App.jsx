@@ -6,7 +6,7 @@ const API_BASE_URL = "https://signal-telegram-server.onrender.com";
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "0529";
 const AUTH_STORAGE_KEY = "signal-dashboard-auth-v1";
 
-const resultOptions = ["수익 🟢", "손절 🔴", "본절 ⚪", "미진입", "진행중"];
+const resultOptions = ["수익 🟢", "손절 🔴", "보합 🟡", "미진입", "진행중"];
 
 const initialSignals = [];
 const initialBlocked = [];
@@ -103,13 +103,15 @@ function sanitizeAmount(value) {
 }
 
 function formatMoney(amount, result = "") {
-  const value = String(amount).trim();
+  const number = Number(String(amount).replace(/[^\d.]/g, ""));
 
-  if (value === "") return "";
+  if (!Number.isFinite(number)) return "";
 
   const isLoss = String(result).includes("손절");
+  const sign = isLoss ? "-" : "+";
+  const absolute = Math.abs(Math.round(number)).toLocaleString();
 
-  return `${isLoss ? "-" : "+"}$${value}`;
+  return `${sign}$${absolute}`;
 }
 
 function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
@@ -149,6 +151,112 @@ function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
         ? thirdAverage + sign * gap
         : null,
   };
+}
+
+const XAUUSD_VALUE_PER_LOT = 100;
+
+const POSITION_LOTS = {
+  1: 1,
+  2: 1,
+  3: 2,
+};
+
+function toProfitNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function getResultValue(amount, forceLoss = false) {
+  if (forceLoss) return "손절 🔴";
+  if (amount > 0) return "수익 🟢";
+  if (amount < 0) return "손절 🔴";
+  return "보합 🟡";
+}
+
+function calculateSinglePositionProfit({ direction, entryPrice, exitPrice, lot }) {
+  const entry = toProfitNumber(entryPrice);
+  const exit = toProfitNumber(exitPrice);
+  const parsedLot = toProfitNumber(lot);
+
+  if (entry === null || exit === null || parsedLot === null) {
+    return 0;
+  }
+
+  const normalizedDirection = String(direction || "").toUpperCase();
+
+  const priceDiff =
+    normalizedDirection === "SHORT" || normalizedDirection === "SELL"
+      ? entry - exit
+      : exit - entry;
+
+  return Math.round(priceDiff * parsedLot * XAUUSD_VALUE_PER_LOT);
+}
+
+function getTpByRound(setup, round) {
+  if (Number(round) === 1) return setup?.firstTp;
+  if (Number(round) === 2) return setup?.secondTp || setup?.firstTp;
+  if (Number(round) === 3) {
+    return setup?.thirdTp || setup?.secondTp || setup?.firstTp;
+  }
+
+  return setup?.firstTp;
+}
+
+function buildAutoPositionDraft({
+  setup,
+  enteredRound,
+  exitPrice,
+  forceLoss = false,
+}) {
+  const selectedRound = Number(enteredRound || 1);
+
+  const rounds = [
+    {
+      round: 1,
+      roundText: "1차",
+      entryPrice: setup?.baseEntry,
+      lot: POSITION_LOTS[1],
+    },
+    {
+      round: 2,
+      roundText: "2차",
+      entryPrice: setup?.entry2,
+      lot: POSITION_LOTS[2],
+    },
+    {
+      round: 3,
+      roundText: "3차",
+      entryPrice: setup?.entry3,
+      lot: POSITION_LOTS[3],
+    },
+  ];
+
+  return rounds.map((item) => {
+    if (item.round > selectedRound) {
+      return {
+        round: item.roundText,
+        result: "미진입",
+        amount: "",
+      };
+    }
+
+    let amount = calculateSinglePositionProfit({
+      direction: setup?.direction,
+      entryPrice: item.entryPrice,
+      exitPrice,
+      lot: item.lot,
+    });
+
+    if (forceLoss) {
+      amount = -Math.abs(amount);
+    }
+
+    return {
+      round: item.roundText,
+      result: getResultValue(amount, forceLoss),
+      amount: String(Math.abs(Math.round(amount))),
+    };
+  });
 }
 
 function makePositionText(signals, tradeDate, tradeSymbol) {
@@ -321,6 +429,15 @@ export default function App() {
       slPrice,
     ]
   );
+
+const latestXauusdPrice = useMemo(() => {
+  const watchPrice = toProfitNumber(watchStatus?.watch?.lastPrice);
+
+  if (watchPrice !== null) return watchPrice;
+
+  const latestTick = priceHistory[priceHistory.length - 1];
+  return toProfitNumber(latestTick?.price);
+}, [watchStatus, priceHistory]);
 
 const calcText = useMemo(() => {
   const directionText = direction === "LONG" ? "롱" : "숏";
@@ -892,6 +1009,68 @@ const calcText = useMemo(() => {
     );
   };
 
+  const applyAutoResult = async (round, type) => {
+    if (isUiLocked) return;
+
+    const setup = savedTradeSetup || currentTradeSetup;
+
+    let exitPrice = null;
+    let forceLoss = false;
+
+    if (type === "profit") {
+      exitPrice = getTpByRound(setup, round);
+    }
+
+    if (type === "loss") {
+      exitPrice = setup?.slPrice;
+      forceLoss = true;
+    }
+
+    if (type === "market") {
+      exitPrice = latestXauusdPrice;
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/xauusd-price`);
+        const data = await response.json();
+
+        if (data.ok && toProfitNumber(data.price) !== null) {
+          exitPrice = data.price;
+          appendPriceTick(
+            data.savedTick ||
+              data.latestTick || {
+                price: data.price,
+                bid: data.bid,
+                ask: data.ask,
+                provider: data.provider,
+                checkedAt: data.timestamp || new Date().toISOString(),
+                createdAt: data.timestamp || new Date().toISOString(),
+              }
+          );
+        }
+      } catch (error) {
+        console.error("시장가 조회 실패:", error);
+      }
+    }
+
+    if (toProfitNumber(exitPrice) === null) {
+      alert(
+        type === "market"
+          ? "현재 시장가를 아직 불러오지 못했어요."
+          : "계산에 필요한 가격값이 없습니다."
+      );
+      return;
+    }
+
+    setPositionDraft(
+      buildAutoPositionDraft({
+        setup,
+        enteredRound: round,
+        exitPrice,
+        forceLoss,
+      })
+    );
+  };
+
   const applyPositionRecord = async () => {
     if (isUiLocked) return;
 
@@ -1420,6 +1599,39 @@ const calcText = useMemo(() => {
               시그널마다 1차에서 끝날 수도, 2차/3차까지 갈 수도 있어서 결과는
               여기서 직접 선택합니다.
             </p>
+
+            <div className="watch-actions auto-result-actions">
+              {[1, 2, 3].map((round) => (
+                <React.Fragment key={round}>
+                  <button
+                    className="copy-button"
+                    type="button"
+                    onClick={() => applyAutoResult(round, "profit")}
+                    disabled={isUiLocked}
+                  >
+                    {round}차 수익
+                  </button>
+
+                  <button
+                    className="copy-button light"
+                    type="button"
+                    onClick={() => applyAutoResult(round, "loss")}
+                    disabled={isUiLocked}
+                  >
+                    {round}차 손절
+                  </button>
+
+                  <button
+                    className="copy-button light"
+                    type="button"
+                    onClick={() => applyAutoResult(round, "market")}
+                    disabled={isUiLocked}
+                  >
+                    {round}차 시장가
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
 
             <div className="form-field position-select">
               <label>기록 적용할 시그널</label>
