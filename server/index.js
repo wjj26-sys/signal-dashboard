@@ -583,8 +583,8 @@ async function sendTextMessageToTarget(text) {
 const PRICE_PROVIDER = process.env.PRICE_PROVIDER || "goldapi_net";
 const GOLD_API_KEY = process.env.GOLD_API_KEY || "";
 const PRICE_POLL_SECONDS = Math.max(
-  30,
-  Number(process.env.PRICE_POLL_SECONDS || 600)
+  1,
+  Number(process.env.PRICE_POLL_SECONDS || 5)
 );
 
 const VANTAGE_MAX_STALE_SECONDS = Math.max(
@@ -1222,25 +1222,9 @@ app.get("/api/xauusd-price", async (req, res) => {
 app.post("/api/vantage-tick", async (req, res) => {
   try {
     if (!VANTAGE_TICK_TOKEN) {
-      const mappedTick = mapPriceTick(data);
-
-      checkTradeWatchOnce({
-        trigger: "vantage_tick",
-        priceData: {
-          price,
-          bid,
-          ask,
-          timestamp: checkedAt,
-          raw: req.body,
-          latestTick: mappedTick,
-        },
-      }).catch((watchError) => {
-        console.error("Vantage tick 즉시 감시 실패:", watchError.message);
-      });
-
-       res.json({
-        ok: true,
-        tick: mappedTick,
+      return res.status(500).json({
+        ok: false,
+        error: "VANTAGE_TICK_TOKEN이 Render 환경변수에 없습니다.",
       });
     }
 
@@ -1294,12 +1278,31 @@ app.post("/api/vantage-tick", async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    const mappedTick = mapPriceTick(data);
+
+    setImmediate(() => {
+      checkTradeWatchOnce({
+        trigger: "vantage_tick",
+        priceData: {
+          price,
+          bid,
+          ask,
+          timestamp: checkedAt,
+          raw: req.body,
+          latestTick: mappedTick,
+        },
+      }).catch((watchError) => {
+        console.error("Vantage tick 즉시 감시 실패:", watchError.message);
+      });
+    });
+
+    return res.json({
       ok: true,
-      tick: mapPriceTick(data),
+      tick: mappedTick,
+      watchTriggered: true,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
       error: error.message,
     });
@@ -1481,11 +1484,6 @@ async function checkTradeWatchOnce(options = {}) {
 
     if (!scheduleState.isOpen) {
       await stopTradeWatchState("auto_schedule_lock");
-      return;
-    }
-
-    if (!activeSignal || activeSignal.status !== "진행중") {
-      await stopTradeWatchState("no_active_signal");
       return;
     }
 
