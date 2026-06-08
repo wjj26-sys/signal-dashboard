@@ -1,25 +1,41 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { createChart, CandlestickSeries, LineStyle } from "lightweight-charts";
 
+const CANDLE_INTERVAL_SECONDS = 5 * 60;
+const CANDLE_INTERVAL_MS = CANDLE_INTERVAL_SECONDS * 1000;
+const INITIAL_VISIBLE_CANDLES = 60;
+const RIGHT_PADDING_CANDLES = 5;
+
 function toNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
+function getTickTimeMs(item) {
+  const dateText =
+    item?.checkedAt ||
+    item?.checked_at ||
+    item?.createdAt ||
+    item?.created_at ||
+    item?.timestamp ||
+    item?.time;
+
+  if (!dateText) return null;
+
+  const timestamp = new Date(dateText).getTime();
+
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 function makeFiveMinuteCandles(priceHistory) {
-  const bucketMs = 5 * 60 * 1000;
   const candleMap = new Map();
 
   const sortedTicks = [...(priceHistory || [])]
     .map((item) => {
       const price = toNumber(item.price);
-      const dateText = item.checkedAt || item.createdAt;
+      const timestamp = getTickTimeMs(item);
 
-      if (price === null || !dateText) return null;
-
-      const timestamp = new Date(dateText).getTime();
-
-      if (!Number.isFinite(timestamp)) return null;
+      if (price === null || timestamp === null) return null;
 
       return {
         price,
@@ -30,7 +46,9 @@ function makeFiveMinuteCandles(priceHistory) {
     .sort((a, b) => a.timestamp - b.timestamp);
 
   sortedTicks.forEach((tick) => {
-    const bucketStartMs = Math.floor(tick.timestamp / bucketMs) * bucketMs;
+    const bucketStartMs =
+      Math.floor(tick.timestamp / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
+
     const time = Math.floor(bucketStartMs / 1000);
     const price = Number(tick.price.toFixed(2));
 
@@ -77,8 +95,8 @@ function makeFallbackCandles(setup) {
   const now = Math.floor(Date.now() / 1000);
   const candles = [];
 
-  for (let index = 24; index >= 1; index -= 1) {
-    const time = now - index * 300;
+  for (let index = 60; index >= 1; index -= 1) {
+    const time = now - index * CANDLE_INTERVAL_SECONDS;
     const wave = Math.sin(index / 2.5) * 6;
     const open = center + wave;
     const close = open + Math.cos(index / 1.7) * 3;
@@ -97,6 +115,15 @@ function makeFallbackCandles(setup) {
   return candles;
 }
 
+function applyStableVisibleRange(chart, totalCount) {
+  if (!chart || !Number.isFinite(totalCount) || totalCount <= 0) return;
+
+  chart.timeScale().setVisibleLogicalRange({
+    from: totalCount - INITIAL_VISIBLE_CANDLES,
+    to: totalCount + RIGHT_PADDING_CANDLES,
+  });
+}
+
 export default function SetupChart({ setup, priceHistory }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -105,6 +132,9 @@ export default function SetupChart({ setup, priceHistory }) {
 
   const hasInitialDataRef = useRef(false);
   const hasFitContentRef = useRef(false);
+  const autoFollowRef = useRef(true);
+  const isApplyingRangeRef = useRef(false);
+
   const previousCandleCountRef = useRef(0);
   const previousLastTimeRef = useRef(null);
   const previousModeRef = useRef("fallback");
@@ -146,6 +176,8 @@ export default function SetupChart({ setup, priceHistory }) {
         borderColor: "#e2e8f0",
         timeVisible: true,
         secondsVisible: false,
+        rightOffset: RIGHT_PADDING_CANDLES,
+        barSpacing: 12,
       },
     });
 
@@ -174,10 +206,21 @@ export default function SetupChart({ setup, priceHistory }) {
       });
     };
 
+    const handleVisibleRangeChange = () => {
+      if (isApplyingRangeRef.current) return;
+
+      // 사용자가 직접 차트를 움직이거나 축소/확대하면 자동 따라가기를 멈춤
+      if (hasInitialDataRef.current) {
+        autoFollowRef.current = false;
+      }
+    };
+
     window.addEventListener("resize", handleResize);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
 
       if (chartRef.current) {
         chartRef.current.remove();
@@ -189,6 +232,9 @@ export default function SetupChart({ setup, priceHistory }) {
 
       hasInitialDataRef.current = false;
       hasFitContentRef.current = false;
+      autoFollowRef.current = true;
+      isApplyingRangeRef.current = false;
+
       previousCandleCountRef.current = 0;
       previousLastTimeRef.current = null;
       previousModeRef.current = "fallback";
@@ -209,46 +255,36 @@ export default function SetupChart({ setup, priceHistory }) {
       previousCandleCountRef.current !== candles.length;
     const lastTimeChanged = previousLastTimeRef.current !== lastCandle.time;
 
-    // 처음 열었을 때 / 가짜 데이터에서 실제 데이터로 전환될 때 / 과거 데이터가 늘어났을 때만 전체 세팅
-    if (
+    const shouldSetAllData =
       !hasInitialDataRef.current ||
       modeChanged ||
       candleCountChanged ||
-      lastTimeChanged
-    ) {
+      lastTimeChanged;
+
+    if (shouldSetAllData) {
       candleSeriesRef.current.setData(candles);
-
-      hasInitialDataRef.current = true;
-      previousCandleCountRef.current = candles.length;
-      previousLastTimeRef.current = lastCandle.time;
-      previousModeRef.current = mode;
-
-      // 차트 열릴 때 한 번만 자동 맞춤. 이후 사용자가 축소한 상태 유지
-      if (!hasFitContentRef.current) {
-        const visibleCount = 36;
-        const totalCount = candles.length;
-
-        if (totalCount > visibleCount) {
-          chartRef.current.timeScale().setVisibleLogicalRange({
-            from: totalCount - visibleCount,
-            to: totalCount + 5,
-          });
-        } else {
-          chartRef.current.timeScale().fitContent();
-        }
-
-        hasFitContentRef.current = true;
-      }
-
-      return;
+    } else {
+      candleSeriesRef.current.update(lastCandle);
     }
 
-    // 같은 5분봉 안에서는 현재 봉만 갱신
-    candleSeriesRef.current.update(lastCandle);
-
+    hasInitialDataRef.current = true;
     previousCandleCountRef.current = candles.length;
     previousLastTimeRef.current = lastCandle.time;
     previousModeRef.current = mode;
+
+    // 처음 열었을 때는 무조건 60개 봉 기준으로 보여줌
+    // 이후 사용자가 차트를 건드리지 않았으면 새 봉이 생길 때 최신 봉을 계속 따라감
+    if (!hasFitContentRef.current || autoFollowRef.current) {
+      isApplyingRangeRef.current = true;
+
+      applyStableVisibleRange(chartRef.current, candles.length);
+
+      window.setTimeout(() => {
+        isApplyingRangeRef.current = false;
+      }, 0);
+
+      hasFitContentRef.current = true;
+    }
   }, [chartData]);
 
   useEffect(() => {
