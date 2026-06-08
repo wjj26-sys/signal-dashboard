@@ -425,7 +425,7 @@ const calcText = useMemo(() => {
     try {
       setPriceHistoryLoading(true);
 
-      const response = await fetch(`${API_BASE_URL}/api/xauusd-history?limit=1000`);
+      const response = await fetch(`${API_BASE_URL}/api/xauusd-history?limit=20000`);
       const data = await response.json();
 
       if (!data.ok) {

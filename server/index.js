@@ -1310,7 +1310,7 @@ app.get("/api/xauusd-history", async (req, res) => {
   try {
     const db = requireSupabase();
 
-    const limit = Math.min(Number(req.query.limit || 240), 1000);
+    const limit = Math.min(Number(req.query.limit || 20000), 50000);
 
     let query = db
       .from("xauusd_price_ticks")
