@@ -1544,3 +1544,8 @@ textarea:focus {
     max-height: 260px !important;
   }
 }
+
+/* 포지션 기록기를 포지션 선택 패널 바로 아래로 당기기 */
+.record-card {
+  margin-top: -180px;
+}
