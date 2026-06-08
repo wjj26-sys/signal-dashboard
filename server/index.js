@@ -47,6 +47,7 @@ let botEnabled = true;
 let signalRunning = false;
 let testMode = false;
 let activeSignal = null;
+let tradeWatchCheckInProgress = false;
 
 let sentSignals = [];
 let blockedSignals = [];
@@ -87,8 +88,45 @@ function getWeekKey(dateText) {
   return toDateText(date);
 }
 
+function getAutoScheduleState() {
+  const now = getKstNow();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+
+  const minutes = hour * 60 + minute;
+
+  const openStart1 = 8 * 60;
+  const openEnd1 = 10 * 60;
+
+  const lockStart = 10 * 60;
+  const lockEnd = 11 * 60;
+
+  const openStart2 = 11 * 60;
+  const lockStart2 = 1 * 60;
+
+  const isFirstOpen = minutes >= openStart1 && minutes < openEnd1;
+  const isSecondOpen = minutes >= openStart2 || minutes < lockStart2;
+  const isLockTime = minutes >= lockStart && minutes < lockEnd;
+
+  const isOpen = (isFirstOpen || isSecondOpen) && !isLockTime;
+
+  if (isOpen) {
+    return {
+      isOpen: true,
+      statusText: "자동 운영 시간",
+      reason: "",
+    };
+  }
+
+  return {
+    isOpen: false,
+    statusText: "자동 잠금 시간",
+    reason: "자동 잠금 시간으로 미전송",
+  };
+}
+
 function isOperatingTime() {
-  return true;
+  return getAutoScheduleState().isOpen;
 }
 
 function getMessageText(message) {
@@ -663,6 +701,17 @@ async function handleSignalMessage(message) {
     return;
   }
 
+  const scheduleState = getAutoScheduleState();
+
+  if (!scheduleState.isOpen) {
+    await addBlockedSignal(
+      message,
+      scheduleState.reason || "자동 잠금 시간으로 미전송",
+      sourceRoom
+    );
+    return;
+  }
+
   if (signalRunning) {
     await addBlockedSignal(message, "진행중 유입으로 미전송", sourceRoom);
     return;
@@ -1173,9 +1222,25 @@ app.get("/api/xauusd-price", async (req, res) => {
 app.post("/api/vantage-tick", async (req, res) => {
   try {
     if (!VANTAGE_TICK_TOKEN) {
-      return res.status(500).json({
-        ok: false,
-        error: "VANTAGE_TICK_TOKEN이 Render 환경변수에 없습니다.",
+      const mappedTick = mapPriceTick(data);
+
+      checkTradeWatchOnce({
+        trigger: "vantage_tick",
+        priceData: {
+          price,
+          bid,
+          ask,
+          timestamp: checkedAt,
+          raw: req.body,
+          latestTick: mappedTick,
+        },
+      }).catch((watchError) => {
+        console.error("Vantage tick 즉시 감시 실패:", watchError.message);
+      });
+
+       res.json({
+        ok: true,
+        tick: mappedTick,
       });
     }
 
@@ -1390,10 +1455,10 @@ app.post("/api/trade-watch/stop", async (req, res) => {
   }
 });
 
-async function checkTradeWatchOnce() {
-  if (isCheckingTradeWatch) return;
+async function checkTradeWatchOnce(options = {}) {
+  if (tradeWatchCheckInProgress) return;
 
-  isCheckingTradeWatch = true;
+  tradeWatchCheckInProgress = true;
 
   try {
     const db = requireSupabase();
@@ -1412,18 +1477,25 @@ async function checkTradeWatchOnce() {
       return;
     }
 
+    const scheduleState = getAutoScheduleState();
+
+    if (!scheduleState.isOpen) {
+      await stopTradeWatchState("auto_schedule_lock");
+      return;
+    }
+
     if (!activeSignal || activeSignal.status !== "진행중") {
       await stopTradeWatchState("no_active_signal");
       return;
     }
 
-    const priceData = await fetchXauUsdPrice();
+    const priceData = options.priceData || (await fetchXauUsdPrice());
 
-    if (PRICE_PROVIDER !== "vantage_mt5") {
+    if (!options.priceData && PRICE_PROVIDER !== "vantage_mt5") {
       await saveXauUsdPriceTick(priceData, "watch");
     }
 
-    const price = priceData.price;
+    const price = Number(priceData.price);
 
     const direction = watch.direction || "LONG";
 
@@ -1520,7 +1592,7 @@ async function checkTradeWatchOnce() {
       }
     }
   } finally {
-    isCheckingTradeWatch = false;
+    tradeWatchCheckInProgress = false;
   }
 }
 
