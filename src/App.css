@@ -1549,3 +1549,14 @@ textarea:focus {
 .record-card {
   margin-top: -180px;
 }
+
+/* 진입가 계산기 라벨 위치 살짝 아래로 */
+.calc-card .form-field label {
+  transform: translateY(6px);
+  margin-bottom: 2px;
+}
+
+/* 포지션 선택 패널 안내 문구 숨김 */
+.position-card > .muted-note:not(.selected-note) {
+  display: none;
+}
