@@ -225,7 +225,18 @@ export default function SetupChart({ setup, priceHistory }) {
 
       // 차트 열릴 때 한 번만 자동 맞춤. 이후 사용자가 축소한 상태 유지
       if (!hasFitContentRef.current) {
-        chartRef.current.timeScale().fitContent();
+        const visibleCount = 36;
+        const totalCount = candles.length;
+
+        if (totalCount > visibleCount) {
+          chartRef.current.timeScale().setVisibleLogicalRange({
+            from: totalCount - visibleCount,
+            to: totalCount + 5,
+          });
+        } else {
+          chartRef.current.timeScale().fitContent();
+        }
+
         hasFitContentRef.current = true;
       }
 
