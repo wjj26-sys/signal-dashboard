@@ -1547,7 +1547,7 @@ textarea:focus {
 
 /* 포지션 기록기를 포지션 선택 패널 바로 아래로 당기기 */
 .record-card {
-  margin-top: -210px;
+  margin-top: -230px;
 }
 
 /* 진입가 계산기 라벨 위치 살짝 아래로 */
