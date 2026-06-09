@@ -1040,6 +1040,7 @@ const calcText = useMemo(() => {
     const setup = savedTradeSetup || currentTradeSetup;
     const clickedRound = index + 1;
 
+    // 미진입/진행중은 선택한 회차만 변경하고 금액은 비웁니다.
     if (selectedResult === "미진입" || selectedResult === "진행중") {
       setPositionDraft((prev) =>
         prev.map((item, itemIndex) =>
@@ -1055,45 +1056,62 @@ const calcText = useMemo(() => {
       return;
     }
 
+    const entryPrice = getEntryByRound(setup, clickedRound);
+    const lot = POSITION_LOTS[clickedRound];
     let exitPrice = null;
-    let forceLoss = false;
-    let enteredRound = clickedRound;
+    let amount = 0;
 
     if (selectedResult.includes("수익")) {
       exitPrice = getTpByRound(setup, clickedRound);
-      enteredRound = clickedRound;
-    }
-
-    if (selectedResult.includes("손절")) {
+    } else if (selectedResult.includes("손절")) {
       exitPrice = setup?.slPrice;
-      forceLoss = true;
-      enteredRound = clickedRound;
-    }
-
-    if (selectedResult.includes("보합")) {
-      exitPrice = getEntryByRound(setup, clickedRound);
-
-      const highestEnteredRound = positionDraft.reduce((max, item) => {
-        if (item.result === "미진입") return max;
-
-        return Math.max(max, getRoundNumberFromText(item.round));
-      }, clickedRound);
-
-      enteredRound = highestEnteredRound;
-    }
-
-    if (toProfitNumber(exitPrice) === null) {
-      alert("계산에 필요한 가격값이 없습니다.");
+    } else if (selectedResult.includes("보합")) {
+      // 보합은 해당 회차 금액만 +$0으로 처리합니다.
+      setPositionDraft((prev) =>
+        prev.map((item, itemIndex) =>
+          itemIndex === index
+            ? {
+                ...item,
+                result: selectedResult,
+                amount: "0",
+              }
+            : item
+        )
+      );
       return;
     }
 
-    setPositionDraft(
-      buildAutoPositionDraft({
-        setup,
-        enteredRound,
-        exitPrice,
-        forceLoss,
-      })
+    if (
+      toProfitNumber(entryPrice) === null ||
+      toProfitNumber(exitPrice) === null
+    ) {
+      alert("선택한 회차 계산에 필요한 가격값이 없습니다.");
+      return;
+    }
+
+    amount = calculateSinglePositionProfit({
+      direction: setup?.direction,
+      entryPrice,
+      exitPrice,
+      lot,
+    });
+
+    // 결과 표시는 드롭다운 선택값을 따르고, 금액 칸에는 절댓값만 저장합니다.
+    // 실제 +/- 표시는 formatMoney가 수익/손절 결과에 맞춰 붙입니다.
+    const amountText = String(Math.abs(Math.round(amount)));
+
+    // 핵심: 선택한 회차 한 줄만 변경합니다.
+    // 3차를 수익으로 바꿔도 기존 1차/2차 결과와 금액은 그대로 유지됩니다.
+    setPositionDraft((prev) =>
+      prev.map((item, itemIndex) =>
+        itemIndex === index
+          ? {
+              ...item,
+              result: selectedResult,
+              amount: amountText,
+            }
+          : item
+      )
     );
   };
 
