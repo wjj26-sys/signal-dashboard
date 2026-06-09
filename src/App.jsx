@@ -166,6 +166,14 @@ function toProfitNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function formatDollarAmount(amount) {
+  const rounded = Math.round(Number(amount) || 0);
+  const sign = rounded < 0 ? "-" : "+";
+  const absolute = Math.abs(rounded).toLocaleString();
+
+  return `${sign}$${absolute}`;
+}
+
 function getResultValue(amount, forceLoss = false) {
   if (forceLoss) return "손절 🔴";
   if (amount > 0) return "수익 🟢";
@@ -195,11 +203,28 @@ function calculateSinglePositionProfit({ direction, entryPrice, exitPrice, lot }
 function getTpByRound(setup, round) {
   if (Number(round) === 1) return setup?.firstTp;
   if (Number(round) === 2) return setup?.secondTp || setup?.firstTp;
+
   if (Number(round) === 3) {
     return setup?.thirdTp || setup?.secondTp || setup?.firstTp;
   }
 
   return setup?.firstTp;
+}
+
+function getEntryByRound(setup, round) {
+  if (Number(round) === 1) return setup?.baseEntry;
+  if (Number(round) === 2) return setup?.entry2;
+  if (Number(round) === 3) return setup?.entry3;
+
+  return null;
+}
+
+function getRoundNumberFromText(roundText) {
+  if (String(roundText).includes("1")) return 1;
+  if (String(roundText).includes("2")) return 2;
+  if (String(roundText).includes("3")) return 3;
+
+  return 1;
 }
 
 function buildAutoPositionDraft({
@@ -430,14 +455,14 @@ export default function App() {
     ]
   );
 
-const latestXauusdPrice = useMemo(() => {
-  const watchPrice = toProfitNumber(watchStatus?.watch?.lastPrice);
+  const latestXauusdPrice = useMemo(() => {
+    const watchPrice = toProfitNumber(watchStatus?.watch?.lastPrice);
 
-  if (watchPrice !== null) return watchPrice;
+    if (watchPrice !== null) return watchPrice;
 
-  const latestTick = priceHistory[priceHistory.length - 1];
-  return toProfitNumber(latestTick?.price);
-}, [watchStatus, priceHistory]);
+    const latestTick = priceHistory[priceHistory.length - 1];
+    return toProfitNumber(latestTick?.price);
+  }, [watchStatus, priceHistory]);
 
 const calcText = useMemo(() => {
   const directionText = direction === "LONG" ? "롱" : "숏";
@@ -1009,62 +1034,82 @@ const calcText = useMemo(() => {
     );
   };
 
-  const applyAutoResult = async (round, type) => {
+  const handlePositionResultChange = (index, selectedResult) => {
     if (isUiLocked) return;
 
     const setup = savedTradeSetup || currentTradeSetup;
+    const clickedRound = index + 1;
 
-    let exitPrice = null;
-    let forceLoss = false;
+    // 현재 화면에서 실제 진입된 가장 높은 회차를 찾습니다.
+    // 예: 3차까지 진입한 뒤 2차 보합을 선택해도 3차까지 함께 계산합니다.
+    const highestEnteredRound = positionDraft.reduce((maxRound, item) => {
+      if (item.result === "미진입") return maxRound;
+      return Math.max(maxRound, getRoundNumberFromText(item.round));
+    }, clickedRound);
 
-    if (type === "profit") {
-      exitPrice = getTpByRound(setup, round);
-    }
+    const enteredRound = Math.max(clickedRound, highestEnteredRound);
 
-    if (type === "loss") {
-      exitPrice = setup?.slPrice;
-      forceLoss = true;
-    }
-
-    if (type === "market") {
-      exitPrice = latestXauusdPrice;
-
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/xauusd-price`);
-        const data = await response.json();
-
-        if (data.ok && toProfitNumber(data.price) !== null) {
-          exitPrice = data.price;
-          appendPriceTick(
-            data.savedTick ||
-              data.latestTick || {
-                price: data.price,
-                bid: data.bid,
-                ask: data.ask,
-                provider: data.provider,
-                checkedAt: data.timestamp || new Date().toISOString(),
-                createdAt: data.timestamp || new Date().toISOString(),
+    // 미진입/진행중은 해당 회차만 직접 변경합니다.
+    if (selectedResult === "미진입" || selectedResult === "진행중") {
+      setPositionDraft((prev) =>
+        prev.map((item, itemIndex) =>
+          itemIndex === index
+            ? {
+                ...item,
+                result: selectedResult,
+                amount: "",
               }
-          );
-        }
-      } catch (error) {
-        console.error("시장가 조회 실패:", error);
-      }
-    }
-
-    if (toProfitNumber(exitPrice) === null) {
-      alert(
-        type === "market"
-          ? "현재 시장가를 아직 불러오지 못했어요."
-          : "계산에 필요한 가격값이 없습니다."
+            : item
+        )
       );
       return;
     }
 
+    let exitPrice = null;
+    let forceLoss = false;
+
+    if (selectedResult.includes("수익")) {
+      const livePrice = toProfitNumber(latestXauusdPrice);
+      const clickedEntry = getEntryByRound(setup, clickedRound);
+      const clickedLot = POSITION_LOTS[clickedRound];
+
+      // 시장가 종료처럼 현재가에서 선택 회차가 실제 수익이면
+      // 현재가를 모든 진입 회차의 공통 종료가로 사용합니다.
+      const liveProfit =
+        livePrice === null
+          ? null
+          : calculateSinglePositionProfit({
+              direction: setup?.direction,
+              entryPrice: clickedEntry,
+              exitPrice: livePrice,
+              lot: clickedLot,
+            });
+
+      exitPrice =
+        livePrice !== null && liveProfit !== null && liveProfit > 0
+          ? livePrice
+          : getTpByRound(setup, clickedRound);
+    } else if (selectedResult.includes("손절")) {
+      exitPrice = setup?.slPrice;
+      forceLoss = true;
+    } else if (selectedResult.includes("보합")) {
+      // 선택한 회차의 진입가를 공통 종료가로 사용합니다.
+      // 예: 3차까지 진입 후 2차 보합 선택
+      // → 1차 손절 / 2차 보합 / 3차 수익
+      exitPrice = getEntryByRound(setup, clickedRound);
+    }
+
+    if (toProfitNumber(exitPrice) === null) {
+      alert("계산에 필요한 종료 가격을 확인할 수 없습니다.");
+      return;
+    }
+
+    // 핵심: 하나의 실제 종료가를 기준으로 진입된 모든 회차를 다시 계산합니다.
+    // 각 회차는 진입가와 랏수가 달라 수익/손절/보합이 자동으로 따로 나옵니다.
     setPositionDraft(
       buildAutoPositionDraft({
         setup,
-        enteredRound: round,
+        enteredRound,
         exitPrice,
         forceLoss,
       })
@@ -1568,19 +1613,16 @@ const calcText = useMemo(() => {
               <div className="calc-box">
                 <p>1차 TP</p>
                 <strong>{formatNumber(calc.firstTp)}</strong>
-                <span>1차 진입가 {formatNumber(baseEntry)}</span>
               </div>
 
               <div className="calc-box">
                 <p>2차 TP</p>
                 <strong>{formatNumber(calc.secondTp)}</strong>
-                <span>평균가 {formatNumber(calc.secondAverage)}</span>
               </div>
 
               <div className="calc-box">
                 <p>3차 TP</p>
                 <strong>{formatNumber(calc.thirdTp)}</strong>
-                <span>평균가 {formatNumber(calc.thirdAverage)}</span>
               </div>
             </div>
 
@@ -1599,39 +1641,6 @@ const calcText = useMemo(() => {
               시그널마다 1차에서 끝날 수도, 2차/3차까지 갈 수도 있어서 결과는
               여기서 직접 선택합니다.
             </p>
-
-            <div className="watch-actions auto-result-actions">
-              {[1, 2, 3].map((round) => (
-                <React.Fragment key={round}>
-                  <button
-                    className="copy-button"
-                    type="button"
-                    onClick={() => applyAutoResult(round, "profit")}
-                    disabled={isUiLocked}
-                  >
-                    {round}차 수익
-                  </button>
-
-                  <button
-                    className="copy-button light"
-                    type="button"
-                    onClick={() => applyAutoResult(round, "loss")}
-                    disabled={isUiLocked}
-                  >
-                    {round}차 손절
-                  </button>
-
-                  <button
-                    className="copy-button light"
-                    type="button"
-                    onClick={() => applyAutoResult(round, "market")}
-                    disabled={isUiLocked}
-                  >
-                    {round}차 시장가
-                  </button>
-                </React.Fragment>
-              ))}
-            </div>
 
             <div className="form-field position-select">
               <label>기록 적용할 시그널</label>
@@ -1656,7 +1665,7 @@ const calcText = useMemo(() => {
                   <label>결과 선택</label>
                   <select
                     value={position.result}
-                    onChange={(e) => updateDraft(index, "result", e.target.value)}
+                    onChange={(e) => handlePositionResultChange(index, e.target.value)}
                   >
                     {resultOptions.map((option) => (
                       <option key={option} value={option}>
@@ -1693,6 +1702,35 @@ const calcText = useMemo(() => {
                 아직 기록할 시그널이 없습니다.
               </p>
             )}
+          </div>
+
+          <div className="card record-card">
+            <div className="table-header">
+              <div className="section-title">포지션 기록기</div>
+
+              <div className="record-actions">
+                <button
+                  className="copy-button"
+                  onClick={savePositionRecord}
+                  disabled={archiveLoading || isUiLocked}
+                >
+                  {isUiLocked ? "잠금중" : saved ? "저장완료" : "저장"}
+                </button>
+
+                <button
+                  className="copy-button"
+                  onClick={() => copyText(positionText, setCopied)}
+                >
+                  {copied ? "복사완료" : "복사하기"}
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              value={positionText}
+              readOnly
+              placeholder="포지션 기록이 생성되면 여기에 표시됩니다."
+            />
           </div>
 
           <div className={`card signal-card lockable-card ${isUiLocked ? "is-locked" : ""}`}>
@@ -1756,35 +1794,6 @@ const calcText = useMemo(() => {
                 </tbody>
               </table>
             </div>
-          </div>
-
-          <div className="card record-card">
-            <div className="table-header">
-              <div className="section-title">포지션 기록기</div>
-
-              <div className="record-actions">
-                <button
-                  className="copy-button"
-                  onClick={savePositionRecord}
-                  disabled={archiveLoading || isUiLocked}
-                >
-                  {isUiLocked ? "잠금중" : saved ? "저장완료" : "저장"}
-                </button>
-
-                <button
-                  className="copy-button"
-                  onClick={() => copyText(positionText, setCopied)}
-                >
-                  {copied ? "복사완료" : "복사하기"}
-                </button>
-              </div>
-            </div>
-
-            <textarea
-              value={positionText}
-              readOnly
-              placeholder="포지션 기록이 생성되면 여기에 표시됩니다."
-            />
           </div>
 
           <div className="archive-column">
