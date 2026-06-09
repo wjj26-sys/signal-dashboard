@@ -1196,6 +1196,35 @@ async function stopTradeWatchState(reason = "stopped") {
   return data;
 }
 
+async function getManualMarketExitPrice() {
+  try {
+    const priceData = await fetchXauUsdPrice();
+    const price = toNullableNumber(priceData?.price);
+
+    if (price !== null) return price;
+  } catch (error) {
+    console.error("시장가 종료 현재가 조회 실패:", error.message);
+  }
+
+  // 실시간 조회가 실패하면 자동 감시가 마지막으로 저장한 가격을 사용합니다.
+  try {
+    const db = requireSupabase();
+
+    const { data, error } = await db
+      .from("trade_watch_state")
+      .select("last_price")
+      .eq("watch_key", "current")
+      .maybeSingle();
+
+    if (error) throw error;
+
+    return toNullableNumber(data?.last_price);
+  } catch (error) {
+    console.error("시장가 종료 마지막 가격 조회 실패:", error.message);
+    return null;
+  }
+}
+
 app.get("/api/xauusd-price", async (req, res) => {
   try {
     const priceData = await fetchXauUsdPrice();
@@ -1893,11 +1922,31 @@ app.post("/api/manual-off", async (req, res) => {
 
 app.post("/api/finish-signal", async (req, res) => {
   try {
+    await syncSignalLogsFromDb();
+
+    const closedSignalId = activeSignal?.id || null;
+    const marketExitAt = new Date().toISOString();
+    const marketExitPrice = await getManualMarketExitPrice();
+
+    // 종료 버튼을 누른 순간 가격을 감시 상태의 마지막 가격으로 남겨둡니다.
+    if (marketExitPrice !== null) {
+      const db = requireSupabase();
+
+      const { error: priceUpdateError } = await db
+        .from("trade_watch_state")
+        .update({
+          last_price: marketExitPrice,
+          last_checked_at: marketExitAt,
+        })
+        .eq("watch_key", "current");
+
+      if (priceUpdateError) throw priceUpdateError;
+    }
+
     if (activeSignal && activeSignal.status === "진행중") {
       await sendCloseMarketMessage();
     }
 
-    await syncSignalLogsFromDb();
     await finishActiveSignalLog();
     await stopTradeWatchState("finish_signal");
 
@@ -1910,6 +1959,9 @@ app.post("/api/finish-signal", async (req, res) => {
     res.json({
       ok: true,
       message: "포지션이 종료되었습니다. 다음 신호를 받을 수 있습니다.",
+      closedSignalId,
+      marketExitPrice,
+      marketExitAt,
       botEnabled,
       signalRunning,
       canReceiveSignal: true,

@@ -5,6 +5,7 @@ import SetupChart from "./SetupChart.jsx";
 const API_BASE_URL = "https://signal-telegram-server.onrender.com";
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "0529";
 const AUTH_STORAGE_KEY = "signal-dashboard-auth-v1";
+const MARKET_EXIT_STORAGE_KEY = "signal-dashboard-market-exit-v1";
 
 const resultOptions = ["수익 🟢", "손절 🔴", "보합 🟡", "미진입", "진행중"];
 
@@ -41,6 +42,28 @@ function getTimeText() {
 
 function clonePositions(positions) {
   return positions.map((position) => ({ ...position }));
+}
+
+function getStoredMarketExitInfo() {
+  try {
+    const saved = localStorage.getItem(MARKET_EXIT_STORAGE_KEY);
+
+    if (!saved) return null;
+
+    const parsed = JSON.parse(saved);
+    const price = Number(parsed?.price);
+
+    if (!parsed?.signalId || !Number.isFinite(price)) return null;
+
+    return {
+      signalId: String(parsed.signalId),
+      price,
+      at: parsed.at || null,
+    };
+  } catch (error) {
+    console.error("시장가 종료 가격 불러오기 실패:", error);
+    return null;
+  }
 }
 
 function makePositionDraft() {
@@ -382,6 +405,9 @@ export default function App() {
 
   const [selectedSignalId, setSelectedSignalId] = useState("");
   const [positionDraft, setPositionDraft] = useState(() => makePositionDraft());
+  const [marketExitInfo, setMarketExitInfo] = useState(() =>
+    getStoredMarketExitInfo()
+  );
 
   const [archives, setArchives] = useState([]);
   const [selectedArchiveKey, setSelectedArchiveKey] = useState("");
@@ -1040,15 +1066,6 @@ const calcText = useMemo(() => {
     const setup = savedTradeSetup || currentTradeSetup;
     const clickedRound = index + 1;
 
-    // 현재 화면에서 실제 진입된 가장 높은 회차를 찾습니다.
-    // 예: 3차까지 진입한 뒤 2차 보합을 선택해도 3차까지 함께 계산합니다.
-    const highestEnteredRound = positionDraft.reduce((maxRound, item) => {
-      if (item.result === "미진입") return maxRound;
-      return Math.max(maxRound, getRoundNumberFromText(item.round));
-    }, clickedRound);
-
-    const enteredRound = Math.max(clickedRound, highestEnteredRound);
-
     // 미진입/진행중은 해당 회차만 직접 변경합니다.
     if (selectedResult === "미진입" || selectedResult === "진행중") {
       setPositionDraft((prev) =>
@@ -1065,38 +1082,47 @@ const calcText = useMemo(() => {
       return;
     }
 
+    // 수동으로 포지션 종료를 눌렀을 때 서버가 저장해 준 실제 종료가입니다.
+    // 선택 중인 시그널과 종료된 시그널이 같을 때만 시장가 계산을 사용합니다.
+    const storedMarketExitPrice =
+      String(marketExitInfo?.signalId || "") === String(selectedSignalId || "")
+        ? toProfitNumber(marketExitInfo?.price)
+        : null;
+
     let exitPrice = null;
     let forceLoss = false;
+    let enteredRound = clickedRound;
 
     if (selectedResult.includes("수익")) {
-      const livePrice = toProfitNumber(latestXauusdPrice);
-      const clickedEntry = getEntryByRound(setup, clickedRound);
-      const clickedLot = POSITION_LOTS[clickedRound];
-
-      // 시장가 종료처럼 현재가에서 선택 회차가 실제 수익이면
-      // 현재가를 모든 진입 회차의 공통 종료가로 사용합니다.
-      const liveProfit =
-        livePrice === null
-          ? null
-          : calculateSinglePositionProfit({
-              direction: setup?.direction,
-              entryPrice: clickedEntry,
-              exitPrice: livePrice,
-              lot: clickedLot,
-            });
-
-      exitPrice =
-        livePrice !== null && liveProfit !== null && liveProfit > 0
-          ? livePrice
-          : getTpByRound(setup, clickedRound);
+      if (storedMarketExitPrice !== null) {
+        // 실제 시장가 종료 후 수익을 선택한 경우:
+        // 종료 버튼을 누른 순간 가격으로 진입된 모든 회차를 계산합니다.
+        // 각 회차는 실제 금액에 따라 수익/손절/보합으로 따로 표시됩니다.
+        exitPrice = storedMarketExitPrice;
+      } else {
+        // 평소 예상 수익 계산:
+        // 현재가가 아니라 선택한 회차의 지정 TP를 사용합니다.
+        exitPrice = getTpByRound(setup, clickedRound);
+      }
     } else if (selectedResult.includes("손절")) {
-      exitPrice = setup?.slPrice;
-      forceLoss = true;
+      if (storedMarketExitPrice !== null) {
+        // 실제 시장가 종료 후 손절을 선택한 경우에도
+        // 종료 순간 가격으로 각 회차의 실제 손익을 계산합니다.
+        exitPrice = storedMarketExitPrice;
+      } else {
+        // 평소 예상 손절 계산은 지정된 SL을 사용합니다.
+        exitPrice = setup?.slPrice;
+        forceLoss = true;
+      }
     } else if (selectedResult.includes("보합")) {
-      // 선택한 회차의 진입가를 공통 종료가로 사용합니다.
-      // 예: 3차까지 진입 후 2차 보합 선택
-      // → 1차 손절 / 2차 보합 / 3차 수익
+      // 보합은 선택한 회차 진입가를 공통 종료가로 사용합니다.
+      // 이미 더 높은 회차가 진입 상태라면 그 회차까지 함께 계산합니다.
       exitPrice = getEntryByRound(setup, clickedRound);
+
+      enteredRound = positionDraft.reduce((maxRound, item) => {
+        if (item.result === "미진입") return maxRound;
+        return Math.max(maxRound, getRoundNumberFromText(item.round));
+      }, clickedRound);
     }
 
     if (toProfitNumber(exitPrice) === null) {
@@ -1104,8 +1130,6 @@ const calcText = useMemo(() => {
       return;
     }
 
-    // 핵심: 하나의 실제 종료가를 기준으로 진입된 모든 회차를 다시 계산합니다.
-    // 각 회차는 진입가와 랏수가 달라 수익/손절/보합이 자동으로 따로 나옵니다.
     setPositionDraft(
       buildAutoPositionDraft({
         setup,
@@ -1229,8 +1253,37 @@ const calcText = useMemo(() => {
 
     if (!ok) return;
 
-    await postServerAction("/api/finish-signal");
+    const data = await postServerAction("/api/finish-signal");
+
+    if (!data?.ok) {
+      alert(data?.error || "포지션 종료에 실패했어요.");
+      return;
+    }
+
+    const exitPrice = toProfitNumber(data.marketExitPrice);
+    const closedSignalId =
+      data.closedSignalId || serverActiveSignal?.id || currentSignal?.id || selectedSignalId;
+
+    if (exitPrice !== null && closedSignalId) {
+      const nextMarketExitInfo = {
+        signalId: String(closedSignalId),
+        price: exitPrice,
+        at: data.marketExitAt || new Date().toISOString(),
+      };
+
+      setMarketExitInfo(nextMarketExitInfo);
+      localStorage.setItem(
+        MARKET_EXIT_STORAGE_KEY,
+        JSON.stringify(nextMarketExitInfo)
+      );
+    } else {
+      alert(
+        "포지션은 종료됐지만 종료 순간 가격을 불러오지 못했어요. 금액을 직접 입력해주세요."
+      );
+    }
+
     finishCurrentSignal();
+    await fetchTradeWatch();
   };
 
   const checkAdminPassword = () => {
