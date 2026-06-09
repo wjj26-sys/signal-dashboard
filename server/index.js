@@ -1458,7 +1458,87 @@ app.post("/api/trade-watch/stop", async (req, res) => {
   }
 });
 
+async function updateTradeWatchHeartbeat(db, price) {
+  const { error } = await db
+    .from("trade_watch_state")
+    .update({
+      last_price: price,
+      last_checked_at: new Date().toISOString(),
+    })
+    .eq("watch_key", "current")
+    .eq("is_active", true);
+
+  if (error) throw error;
+}
+
+async function claimTradeWatchEvent(
+  db,
+  {
+    flagColumn,
+    updates = {},
+    requiredValues = {},
+  }
+) {
+  let query = db
+    .from("trade_watch_state")
+    .update({
+      [flagColumn]: true,
+      ...updates,
+    })
+    .eq("watch_key", "current")
+    .eq("is_active", true)
+    .eq(flagColumn, false);
+
+  Object.entries(requiredValues).forEach(([column, value]) => {
+    query = query.eq(column, value);
+  });
+
+  const { data, error } = await query.select("*").maybeSingle();
+
+  if (error) throw error;
+
+  // 동시에 여러 요청이 들어와도 false → true 선점에 성공한 요청 1개만 data를 받습니다.
+  return data || null;
+}
+
+function getConfirmedWatchStage(watch) {
+  if (watch?.sent_entry3) return 3;
+  if (watch?.sent_entry2) return 2;
+  return 1;
+}
+
+function getTpForWatchStage({
+  stage,
+  firstTp,
+  secondTp,
+  thirdTp,
+}) {
+  if (stage === 3) {
+    return thirdTp ?? secondTp ?? firstTp;
+  }
+
+  if (stage === 2) {
+    return secondTp ?? firstTp;
+  }
+
+  return firstTp;
+}
+
+async function finishPositionAfterAutomaticExit(reason) {
+  await finishActiveSignalLog();
+
+  signalRunning = false;
+  activeSignal = null;
+  botEnabled = true;
+
+  await syncSignalLogsFromDb();
+
+  console.log(`${reason} 도달로 자동 감시 중지 및 포지션 종료 완료`);
+}
+
 async function checkTradeWatchOnce(options = {}) {
+  // 한 서버 프로세스 안에서 겹치는 실행을 1차로 방지합니다.
+  // 실제 중복 발송 방지는 아래 DB 조건부 선점이 담당합니다.
   if (tradeWatchCheckInProgress) return;
 
   tradeWatchCheckInProgress = true;
@@ -1475,15 +1555,13 @@ async function checkTradeWatchOnce(options = {}) {
 
     if (error) throw error;
     if (!watch) return;
-
-    if (!botEnabled) {
-      return;
-    }
+    if (!botEnabled) return;
 
     const scheduleState = getAutoScheduleState();
 
     if (!scheduleState.isOpen) {
-      await stopTradeWatchState("auto_schedule_lock");
+      // 자동 잠금 시간에는 감시 상태를 삭제하지 않고 판단만 잠시 멈춥니다.
+      // 운영 시간이 다시 시작되면 기존 감시가 그대로 재개됩니다.
       return;
     }
 
@@ -1495,6 +1573,12 @@ async function checkTradeWatchOnce(options = {}) {
 
     const price = Number(priceData.price);
 
+    if (!Number.isFinite(price)) {
+      throw new Error("자동 감시에 사용할 현재 가격이 올바르지 않습니다.");
+    }
+
+    await updateTradeWatchHeartbeat(db, price);
+
     const direction = watch.direction || "LONG";
 
     const entry2 = toWatchNumber(watch.entry2);
@@ -1504,97 +1588,199 @@ async function checkTradeWatchOnce(options = {}) {
     const thirdTp = toWatchNumber(watch.third_tp);
     const slPrice = toWatchNumber(watch.sl_price);
 
-    const updates = {
-      last_price: price,
-      last_checked_at: new Date().toISOString(),
-    };
+    /*
+      중요 처리 순서
+      1. SL은 어떤 회차에서도 최우선으로 1회만 처리
+      2. 1차 상태에서는 2차 진입만 처리하고 즉시 종료
+      3. 2차 확인 상태에서만 3차 진입 처리
+      4. TP는 DB에 확정된 마지막 진입 회차의 TP만 사용
 
-    let shouldFinishPosition = false;
-    let activeTp = toWatchNumber(watch.active_tp) || firstTp;
+      따라서:
+      - 2차까지만 확정되면 2차 TP만 사용
+      - 3차 진입이 DB에 확정된 뒤에만 3차 TP 사용
+      - 한 번의 가격 틱에서 2차와 3차 메시지를 동시에 보내지 않음
+    */
 
     if (
-      !watch.sent_entry2 &&
+      !watch.sent_sl &&
+      !watch.sent_tp &&
+      hasTouchedSl(direction, price, slPrice)
+    ) {
+      const claimedSl = await claimTradeWatchEvent(db, {
+        flagColumn: "sent_sl",
+        updates: {
+          is_active: false,
+          stopped_at: new Date().toISOString(),
+          last_price: price,
+          last_checked_at: new Date().toISOString(),
+        },
+        requiredValues: {
+          sent_tp: false,
+        },
+      });
+
+      if (!claimedSl) return;
+
+      let sendError = null;
+
+      try {
+        await sendWatchTelegramMessage(makeSlReachMessage());
+      } catch (error) {
+        sendError = error;
+        console.error("SL 메시지 발송 실패:", error.message);
+      }
+
+      await finishPositionAfterAutomaticExit("SL");
+
+      if (sendError) throw sendError;
+      return;
+    }
+
+    const stage = getConfirmedWatchStage(watch);
+
+    // 1차 상태에서는 2차 진입만 처리합니다.
+    if (
+      stage === 1 &&
       hasTouchedEntry(direction, price, entry2)
     ) {
-      await sendWatchTelegramMessage(
-        makeEntryReachMessage({
-          direction,
-          round: 2,
-          entry: entry2,
-          tp: secondTp || firstTp,
-          sl: slPrice,
-        })
-      );
+      const nextTp = secondTp ?? firstTp;
 
-      updates.sent_entry2 = true;
-      updates.active_tp = secondTp || firstTp;
-      activeTp = secondTp || firstTp;
+      const claimedEntry2 = await claimTradeWatchEvent(db, {
+        flagColumn: "sent_entry2",
+        updates: {
+          active_tp: nextTp,
+          last_price: price,
+          last_checked_at: new Date().toISOString(),
+        },
+        requiredValues: {
+          sent_entry3: false,
+          sent_tp: false,
+          sent_sl: false,
+        },
+      });
+
+      if (!claimedEntry2) return;
+
+      try {
+        await sendWatchTelegramMessage(
+          makeEntryReachMessage({
+            direction,
+            round: 2,
+            entry: entry2,
+            tp: nextTp,
+            sl: slPrice,
+          })
+        );
+      } catch (error) {
+        // 중복 방지를 위해 이미 선점한 플래그는 되돌리지 않습니다.
+        console.error("2차 진입 메시지 발송 실패:", error.message);
+        throw error;
+      }
+
+      return;
     }
 
+    // 2차 진입이 DB에 확정된 상태에서만 3차 진입을 처리합니다.
     if (
-      !watch.sent_entry3 &&
+      stage === 2 &&
       hasTouchedEntry(direction, price, entry3)
     ) {
-      await sendWatchTelegramMessage(
-        makeEntryReachMessage({
-          direction,
-          round: 3,
-          entry: entry3,
-          tp: thirdTp || activeTp,
-          sl: slPrice,
-        })
-      );
+      const nextTp = thirdTp ?? secondTp ?? firstTp;
 
-      updates.sent_entry3 = true;
-      updates.active_tp = thirdTp || activeTp;
-      activeTp = thirdTp || activeTp;
+      const claimedEntry3 = await claimTradeWatchEvent(db, {
+        flagColumn: "sent_entry3",
+        updates: {
+          active_tp: nextTp,
+          last_price: price,
+          last_checked_at: new Date().toISOString(),
+        },
+        requiredValues: {
+          sent_entry2: true,
+          sent_tp: false,
+          sent_sl: false,
+        },
+      });
+
+      if (!claimedEntry3) return;
+
+      try {
+        await sendWatchTelegramMessage(
+          makeEntryReachMessage({
+            direction,
+            round: 3,
+            entry: entry3,
+            tp: nextTp,
+            sl: slPrice,
+          })
+        );
+      } catch (error) {
+        // 중복 방지를 위해 이미 선점한 플래그는 되돌리지 않습니다.
+        console.error("3차 진입 메시지 발송 실패:", error.message);
+        throw error;
+      }
+
+      return;
     }
+
+    // TP는 active_tp 값을 맹신하지 않고, DB에 확정된 진입 회차로 다시 계산합니다.
+    const confirmedTp = getTpForWatchStage({
+      stage,
+      firstTp,
+      secondTp,
+      thirdTp,
+    });
 
     if (
       !watch.sent_tp &&
-      hasTouchedTp(direction, price, activeTp)
-    ) {
-      await sendWatchTelegramMessage(makeTpReachMessage());
-
-      updates.sent_tp = true;
-      updates.is_active = false;
-      updates.stopped_at = new Date().toISOString();
-      shouldFinishPosition = true;
-    } else if (
       !watch.sent_sl &&
-      hasTouchedSl(direction, price, slPrice)
+      hasTouchedTp(direction, price, confirmedTp)
     ) {
-      await sendWatchTelegramMessage(makeSlReachMessage());
+      const stageRequirements =
+        stage === 3
+          ? {
+              sent_entry2: true,
+              sent_entry3: true,
+              sent_sl: false,
+            }
+          : stage === 2
+          ? {
+              sent_entry2: true,
+              sent_entry3: false,
+              sent_sl: false,
+            }
+          : {
+              sent_entry2: false,
+              sent_entry3: false,
+              sent_sl: false,
+            };
 
-      updates.sent_sl = true;
-      updates.is_active = false;
-      updates.stopped_at = new Date().toISOString();
-      shouldFinishPosition = true;
-    }
+      const claimedTp = await claimTradeWatchEvent(db, {
+        flagColumn: "sent_tp",
+        updates: {
+          active_tp: confirmedTp,
+          is_active: false,
+          stopped_at: new Date().toISOString(),
+          last_price: price,
+          last_checked_at: new Date().toISOString(),
+        },
+        requiredValues: stageRequirements,
+      });
 
-    if (shouldFinishPosition) {
-      await stopTradeWatchState("tp_sl_auto_finish");
-      await finishActiveSignalLog();
+      if (!claimedTp) return;
 
-      signalRunning = false;
-      activeSignal = null;
-      botEnabled = true;
+      let sendError = null;
 
-      await syncSignalLogsFromDb();
+      try {
+        await sendWatchTelegramMessage(makeTpReachMessage());
+      } catch (error) {
+        sendError = error;
+        console.error("TP 메시지 발송 실패:", error.message);
+      }
 
-      console.log("TP/SL 도달로 자동 감시 중지 및 포지션 종료 완료");
-    }
+      await finishPositionAfterAutomaticExit("TP");
 
-    if (shouldFinishPosition) {
-      await finishActiveSignalLog();
-
-      signalRunning = false;
-      activeSignal = null;
-      botEnabled = true;
-
-      await syncSignalLogsFromDb();
-
-      console.log("TP/SL 도달로 포지션을 자동 종료했습니다.");
+      if (sendError) throw sendError;
+      return;
     }
   } catch (error) {
     console.error("Trade watch check error:", error.message);
