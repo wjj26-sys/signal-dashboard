@@ -137,14 +137,32 @@ function formatMoney(amount, result = "") {
   return `${sign}$${absolute}`;
 }
 
+function roundTpPrice(direction, value) {
+  const price = Number(value);
+
+  if (!Number.isFinite(price)) return null;
+
+  const normalizedDirection = String(direction || "").toUpperCase();
+
+  // 회사에서 실제 안내하는 정수 TP와 동일하게 맞춥니다.
+  // 숏/하락은 아래 정수, 롱/상승은 위 정수로 TP를 확정합니다.
+  if (normalizedDirection === "SHORT" || normalizedDirection === "SELL") {
+    return Math.floor(price);
+  }
+
+  return Math.ceil(price);
+}
+
 function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
   const base = Number(baseEntry);
   const e2 = Number(entry2);
   const e3 = Number(entry3);
   const gap = Number(tpGap);
-  const sign = direction === "LONG" ? 1 : -1;
+  const normalizedDirection = String(direction || "").toUpperCase();
+  const sign =
+    normalizedDirection === "SHORT" || normalizedDirection === "SELL" ? -1 : 1;
 
-  const firstTp =
+  const rawFirstTp =
     Number.isFinite(base) && Number.isFinite(gap)
       ? base + sign * gap
       : null;
@@ -155,24 +173,28 @@ function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
       ? (base + e2) / 2
       : null;
 
+  const rawSecondTp =
+    secondAverage !== null && Number.isFinite(gap)
+      ? secondAverage + sign * gap
+      : null;
+
   // 1차 1랏 + 2차 1랏 + 3차 2랏
   const thirdAverage =
     Number.isFinite(base) && Number.isFinite(e2) && Number.isFinite(e3)
       ? (base + e2 + e3 * 2) / 4
       : null;
 
+  const rawThirdTp =
+    thirdAverage !== null && Number.isFinite(gap)
+      ? thirdAverage + sign * gap
+      : null;
+
   return {
-    firstTp,
+    firstTp: roundTpPrice(direction, rawFirstTp),
     secondAverage,
-    secondTp:
-      secondAverage !== null && Number.isFinite(gap)
-        ? secondAverage + sign * gap
-        : null,
+    secondTp: roundTpPrice(direction, rawSecondTp),
     thirdAverage,
-    thirdTp:
-      thirdAverage !== null && Number.isFinite(gap)
-        ? thirdAverage + sign * gap
-        : null,
+    thirdTp: roundTpPrice(direction, rawThirdTp),
   };
 }
 
