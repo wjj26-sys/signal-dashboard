@@ -125,6 +125,18 @@ function sanitizeAmount(value) {
   return `${parts[0]}.${parts.slice(1).join("")}`;
 }
 
+function formatMoney(amount, result = "") {
+  const number = Number(String(amount).replace(/[^\d.]/g, ""));
+
+  if (!Number.isFinite(number)) return "";
+
+  const isLoss = String(result).includes("손절");
+  const sign = isLoss ? "-" : "+";
+  const absolute = Math.abs(Math.round(number)).toLocaleString();
+
+  return `${sign}$${absolute}`;
+}
+
 function roundTpPrice(direction, value) {
   const price = Number(value);
 

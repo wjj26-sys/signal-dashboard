@@ -420,30 +420,74 @@ async function finishActiveSignalLog() {
   }
 
   const finishingSignal = activeSignal;
-  const signalLogDate =
-    finishingSignal.logDate || getTodayLogDate();
+  const signalLogDate = finishingSignal.logDate || getTodayLogDate();
 
   if (supabase) {
-    const { error } = await supabase
+    const { data: updatedRow, error: updateError } = await supabase
       .from("signal_logs")
       .update({
         status: "종료",
         ended_at: endedAt,
       })
       .eq("id", finishingSignal.id)
-      .eq("log_date", signalLogDate);
+      .eq("log_type", "sent")
+      .eq("status", "진행중")
+      .select("*")
+      .maybeSingle();
 
-    if (error) throw error;
+    if (updateError) throw updateError;
+
+    let closedRow = updatedRow;
+
+    // 이미 다른 요청에서 종료됐을 수도 있으므로 실제 DB 상태를 다시 확인합니다.
+    if (!closedRow) {
+      const { data: existingRow, error: readError } = await supabase
+        .from("signal_logs")
+        .select("*")
+        .eq("id", finishingSignal.id)
+        .eq("log_type", "sent")
+        .maybeSingle();
+
+      if (readError) throw readError;
+
+      if (!existingRow) {
+        throw new Error("종료할 포지션 기록을 찾지 못했습니다.");
+      }
+
+      if (existingRow.status !== "종료") {
+        throw new Error("포지션 종료 상태가 DB에 반영되지 않았습니다.");
+      }
+
+      closedRow = existingRow;
+    }
+
+    // 날짜 잠금뿐 아니라 해당 시그널에 연결된 잠금도 함께 제거합니다.
+    const { error: lockBySignalError } = await supabase
+      .from("signal_locks")
+      .delete()
+      .eq("signal_log_id", finishingSignal.id);
+
+    if (lockBySignalError) throw lockBySignalError;
 
     await releaseTodaySignalLock(signalLogDate);
 
+    // 날짜가 넘어간 포지션이라면 현재 날짜에 남은 잠금도 함께 정리합니다.
+    if (signalLogDate !== getTodayLogDate()) {
+      await releaseTodaySignalLock();
+    }
+
     await syncSignalLogsFromDb();
 
-    return {
-      ...finishingSignal,
-      status: "종료",
-      endedAt,
-    };
+    if (
+      activeSignal &&
+      String(activeSignal.id) === String(finishingSignal.id)
+    ) {
+      throw new Error("포지션 종료 후에도 진행중 상태가 남아 있습니다.");
+    }
+
+    signalRunning = Boolean(activeSignal);
+
+    return mapSentLog(closedRow);
   }
 
   finishingSignal.status = "종료";
@@ -1575,15 +1619,85 @@ function getTpForWatchStage({
 }
 
 async function finishPositionAfterAutomaticExit(reason) {
-  await finishActiveSignalLog();
+  // TP/SL 선점 단계에서 이미 감시를 비활성화하지만,
+  // 한 번 더 명시적으로 중지해 상태가 남지 않도록 합니다.
+  try {
+    await stopTradeWatchState(`${String(reason).toLowerCase()}_auto_finish`);
+  } catch (stopError) {
+    console.error(
+      `${reason} 도달 후 자동 감시 중지 확인 실패:`,
+      stopError.message
+    );
+  }
 
-  signalRunning = false;
-  activeSignal = null;
-  botEnabled = true;
+  let lastError = null;
+
+  // 일시적인 Supabase 오류가 있어도 포지션 종료를 최대 3번 재시도합니다.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const finishedSignal = await finishActiveSignalLog();
+
+      botEnabled = true;
+
+      await syncSignalLogsFromDb();
+
+      if (signalRunning || activeSignal) {
+        throw new Error("포지션 종료 후 진행중 상태가 남아 있습니다.");
+      }
+
+      console.log(
+        `${reason} 도달로 자동 감시 중지 및 포지션 종료 완료`
+      );
+
+      return finishedSignal;
+    } catch (error) {
+      lastError = error;
+
+      console.error(
+        `${reason} 자동 포지션 종료 ${attempt}차 시도 실패:`,
+        error.message
+      );
+
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 300));
+      }
+    }
+  }
+
+  throw lastError || new Error(`${reason} 자동 포지션 종료에 실패했습니다.`);
+}
+
+async function reconcileCompletedTradeWatch() {
+  const db = requireSupabase();
+
+  const { data: watch, error } = await db
+    .from("trade_watch_state")
+    .select("is_active, sent_tp, sent_sl")
+    .eq("watch_key", "current")
+    .maybeSingle();
+
+  if (error) throw error;
+
+  const hasCompletedExit =
+    watch &&
+    watch.is_active === false &&
+    (watch.sent_tp === true || watch.sent_sl === true);
+
+  if (!hasCompletedExit) return false;
 
   await syncSignalLogsFromDb();
 
-  console.log(`${reason} 도달로 자동 감시 중지 및 포지션 종료 완료`);
+  if (!activeSignal) return false;
+
+  const reason = watch.sent_sl ? "SL" : "TP";
+
+  console.warn(
+    `${reason} 도달 기록은 있으나 포지션이 진행중이라 자동 복구 종료를 실행합니다.`
+  );
+
+  await finishPositionAfterAutomaticExit(reason);
+
+  return true;
 }
 
 async function checkTradeWatchOnce(options = {}) {
@@ -1595,6 +1709,10 @@ async function checkTradeWatchOnce(options = {}) {
 
   try {
     const db = requireSupabase();
+
+    // 이전 요청에서 TP/SL 메시지만 발송되고 종료가 남은 상태가 있으면
+    // 다음 가격 틱에서 자동으로 복구 종료합니다.
+    await reconcileCompletedTradeWatch();
 
     const { data: watch, error } = await db
       .from("trade_watch_state")
@@ -1845,6 +1963,7 @@ async function checkTradeWatchOnce(options = {}) {
 
 app.get("/api/status", async (req, res) => {
   try {
+    await reconcileCompletedTradeWatch();
     await syncSignalLogsFromDb();
 
     const scheduleState = getAutoScheduleState();
