@@ -125,14 +125,10 @@ function sanitizeAmount(value) {
   return `${parts[0]}.${parts.slice(1).join("")}`;
 }
 
-function formatMoney(amount, result = "") {
-  const number = Number(String(amount).replace(/[^\d.]/g, ""));
-
-  if (!Number.isFinite(number)) return "";
-
-  const isLoss = String(result).includes("손절");
-  const sign = isLoss ? "-" : "+";
-  const absolute = Math.abs(Math.round(number)).toLocaleString();
+function formatDollarAmount(amount) {
+  const rounded = Math.round(Number(amount) || 0);
+  const sign = rounded < 0 ? "-" : "+";
+  const absolute = String(Math.abs(rounded));
 
   return `${sign}$${absolute}`;
 }
