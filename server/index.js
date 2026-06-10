@@ -1618,6 +1618,74 @@ function getTpForWatchStage({
   return firstTp;
 }
 
+async function finishSignalLogById(signalId) {
+  if (!signalId) {
+    throw new Error("자동 종료할 신호 ID가 없습니다.");
+  }
+
+  const db = requireSupabase();
+  const endedAt = getTimeText();
+
+  const { data: updatedRow, error: updateError } = await db
+    .from("signal_logs")
+    .update({
+      status: "종료",
+      ended_at: endedAt,
+    })
+    .eq("id", signalId)
+    .eq("log_type", "sent")
+    .eq("status", "진행중")
+    .select("*")
+    .maybeSingle();
+
+  if (updateError) throw updateError;
+
+  let closedRow = updatedRow;
+
+  // 첫 시도에서 이미 종료됐거나 다른 동일 요청이 먼저 끝냈다면,
+  // 같은 신호 ID의 실제 상태만 확인합니다. 다른 새 신호는 절대 건드리지 않습니다.
+  if (!closedRow) {
+    const { data: existingRow, error: readError } = await db
+      .from("signal_logs")
+      .select("*")
+      .eq("id", signalId)
+      .eq("log_type", "sent")
+      .maybeSingle();
+
+    if (readError) throw readError;
+
+    if (!existingRow) {
+      throw new Error("자동 종료 대상 신호를 찾지 못했습니다.");
+    }
+
+    if (existingRow.status !== "종료") {
+      throw new Error("자동 종료 대상 신호가 아직 진행중입니다.");
+    }
+
+    closedRow = existingRow;
+  }
+
+  // 종료한 바로 그 신호에 연결된 잠금만 제거합니다.
+  // 새 신호의 잠금이나 다른 날짜 잠금은 삭제하지 않습니다.
+  const { error: lockError } = await db
+    .from("signal_locks")
+    .delete()
+    .eq("signal_log_id", signalId);
+
+  if (lockError) throw lockError;
+
+  await syncSignalLogsFromDb();
+
+  if (
+    activeSignal &&
+    String(activeSignal.id) === String(signalId)
+  ) {
+    throw new Error("자동 종료 후에도 같은 신호가 진행중으로 남아 있습니다.");
+  }
+
+  return mapSentLog(closedRow);
+}
+
 async function finishPositionAfterAutomaticExit(reason) {
   // TP/SL 선점 단계에서 이미 감시를 비활성화하지만,
   // 한 번 더 명시적으로 중지해 상태가 남지 않도록 합니다.
@@ -1630,23 +1698,37 @@ async function finishPositionAfterAutomaticExit(reason) {
     );
   }
 
+  // 종료 대상은 이 순간의 진행중 신호 ID로 한 번만 고정합니다.
+  // 재시도 중 새 신호가 들어와도 종료 대상이 바뀌지 않습니다.
+  await syncSignalLogsFromDb();
+
+  const targetSignalId = activeSignal?.id || null;
+
+  if (!targetSignalId) {
+    console.log(`${reason} 도달 감시는 중지됐지만 종료할 진행중 신호가 없습니다.`);
+    return null;
+  }
+
   let lastError = null;
 
-  // 일시적인 Supabase 오류가 있어도 포지션 종료를 최대 3번 재시도합니다.
+  // 재시도는 같은 signalId의 DB 상태 변경만 반복합니다.
+  // 텔레그램 메시지는 이 함수 밖에서 이미 1번만 발송됩니다.
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const finishedSignal = await finishActiveSignalLog();
+      const finishedSignal = await finishSignalLogById(targetSignalId);
 
       botEnabled = true;
-
       await syncSignalLogsFromDb();
 
-      if (signalRunning || activeSignal) {
-        throw new Error("포지션 종료 후 진행중 상태가 남아 있습니다.");
+      if (
+        activeSignal &&
+        String(activeSignal.id) === String(targetSignalId)
+      ) {
+        throw new Error("포지션 종료 후 같은 신호가 진행중으로 남아 있습니다.");
       }
 
       console.log(
-        `${reason} 도달로 자동 감시 중지 및 포지션 종료 완료`
+        `${reason} 도달로 자동 감시 중지 및 포지션 종료 완료: ${targetSignalId}`
       );
 
       return finishedSignal;
@@ -1654,7 +1736,7 @@ async function finishPositionAfterAutomaticExit(reason) {
       lastError = error;
 
       console.error(
-        `${reason} 자동 포지션 종료 ${attempt}차 시도 실패:`,
+        `${reason} 자동 포지션 종료 ${attempt}차 시도 실패 (${targetSignalId}):`,
         error.message
       );
 
@@ -1667,39 +1749,6 @@ async function finishPositionAfterAutomaticExit(reason) {
   throw lastError || new Error(`${reason} 자동 포지션 종료에 실패했습니다.`);
 }
 
-async function reconcileCompletedTradeWatch() {
-  const db = requireSupabase();
-
-  const { data: watch, error } = await db
-    .from("trade_watch_state")
-    .select("is_active, sent_tp, sent_sl")
-    .eq("watch_key", "current")
-    .maybeSingle();
-
-  if (error) throw error;
-
-  const hasCompletedExit =
-    watch &&
-    watch.is_active === false &&
-    (watch.sent_tp === true || watch.sent_sl === true);
-
-  if (!hasCompletedExit) return false;
-
-  await syncSignalLogsFromDb();
-
-  if (!activeSignal) return false;
-
-  const reason = watch.sent_sl ? "SL" : "TP";
-
-  console.warn(
-    `${reason} 도달 기록은 있으나 포지션이 진행중이라 자동 복구 종료를 실행합니다.`
-  );
-
-  await finishPositionAfterAutomaticExit(reason);
-
-  return true;
-}
-
 async function checkTradeWatchOnce(options = {}) {
   // 한 서버 프로세스 안에서 겹치는 실행을 1차로 방지합니다.
   // 실제 중복 발송 방지는 아래 DB 조건부 선점이 담당합니다.
@@ -1709,10 +1758,6 @@ async function checkTradeWatchOnce(options = {}) {
 
   try {
     const db = requireSupabase();
-
-    // 이전 요청에서 TP/SL 메시지만 발송되고 종료가 남은 상태가 있으면
-    // 다음 가격 틱에서 자동으로 복구 종료합니다.
-    await reconcileCompletedTradeWatch();
 
     const { data: watch, error } = await db
       .from("trade_watch_state")
@@ -1963,7 +2008,6 @@ async function checkTradeWatchOnce(options = {}) {
 
 app.get("/api/status", async (req, res) => {
   try {
-    await reconcileCompletedTradeWatch();
     await syncSignalLogsFromDb();
 
     const scheduleState = getAutoScheduleState();
