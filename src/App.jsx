@@ -125,14 +125,6 @@ function sanitizeAmount(value) {
   return `${parts[0]}.${parts.slice(1).join("")}`;
 }
 
-function formatDollarAmount(amount) {
-  const rounded = Math.round(Number(amount) || 0);
-  const sign = rounded < 0 ? "-" : "+";
-  const absolute = String(Math.abs(rounded));
-
-  return `${sign}$${absolute}`;
-}
-
 function roundTpPrice(direction, value) {
   const price = Number(value);
 
