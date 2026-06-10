@@ -132,7 +132,7 @@ function formatMoney(amount, result = "") {
 
   const isLoss = String(result).includes("손절");
   const sign = isLoss ? "-" : "+";
-  const absolute = Math.abs(Math.round(number)).toLocaleString();
+  const absolute = String(Math.abs(Math.round(number)));
 
   return `${sign}$${absolute}`;
 }
@@ -211,13 +211,6 @@ function toProfitNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function formatDollarAmount(amount) {
-  const rounded = Math.round(Number(amount) || 0);
-  const sign = rounded < 0 ? "-" : "+";
-  const absolute = Math.abs(rounded).toLocaleString();
-
-  return `${sign}$${absolute}`;
-}
 
 function getResultValue(amount, forceLoss = false) {
   if (forceLoss) return "손절 🔴";
