@@ -230,15 +230,16 @@ async function syncSignalLogsFromDb() {
 
   const today = getTodayLogDate();
 
-  const { data, error } = await supabase
+  // 화면의 전송/미전송 기록은 기존처럼 오늘 기록만 표시합니다.
+  const { data: todayRows, error: todayError } = await supabase
     .from("signal_logs")
     .select("*")
     .eq("log_date", today)
     .order("created_at", { ascending: true });
 
-  if (error) throw error;
+  if (todayError) throw todayError;
 
-  const rows = data || [];
+  const rows = todayRows || [];
 
   sentSignals = rows
     .filter((row) => row.log_type === "sent")
@@ -248,20 +249,31 @@ async function syncSignalLogsFromDb() {
     .filter((row) => row.log_type === "blocked")
     .map(mapBlockedLog);
 
-  activeSignal =
-    [...sentSignals].reverse().find((item) => item.status === "진행중") ||
-    null;
+  // 진행 중 포지션은 날짜와 관계없이 가장 최근 1개를 찾습니다.
+  const { data: activeRow, error: activeError } = await supabase
+    .from("signal_logs")
+    .select("*")
+    .eq("log_type", "sent")
+    .eq("status", "진행중")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
+  if (activeError) throw activeError;
+
+  activeSignal = activeRow ? mapSentLog(activeRow) : null;
   signalRunning = Boolean(activeSignal);
 }
 
-async function releaseTodaySignalLock() {
+async function releaseTodaySignalLock(
+  lockDate = getTodayLogDate()
+) {
   if (!supabase) return;
 
   const { error } = await supabase
     .from("signal_locks")
     .delete()
-    .eq("lock_date", getTodayLogDate());
+    .eq("lock_date", lockDate);
 
   if (error) throw error;
 }
@@ -407,6 +419,10 @@ async function finishActiveSignalLog() {
     return null;
   }
 
+  const finishingSignal = activeSignal;
+  const signalLogDate =
+    finishingSignal.logDate || getTodayLogDate();
+
   if (supabase) {
     const { error } = await supabase
       .from("signal_logs")
@@ -414,22 +430,27 @@ async function finishActiveSignalLog() {
         status: "종료",
         ended_at: endedAt,
       })
-      .eq("id", activeSignal.id)
-      .eq("log_date", getTodayLogDate());
+      .eq("id", finishingSignal.id)
+      .eq("log_date", signalLogDate);
 
     if (error) throw error;
 
-    await releaseTodaySignalLock();
+    await releaseTodaySignalLock(signalLogDate);
 
     await syncSignalLogsFromDb();
-    return activeSignal;
+
+    return {
+      ...finishingSignal,
+      status: "종료",
+      endedAt,
+    };
   }
 
-  activeSignal.status = "종료";
-  activeSignal.endedAt = endedAt;
+  finishingSignal.status = "종료";
+  finishingSignal.endedAt = endedAt;
 
   sentSignals = sentSignals.map((item) =>
-    String(item.id) === String(activeSignal.id)
+    String(item.id) === String(finishingSignal.id)
       ? {
           ...item,
           status: "종료",
@@ -441,7 +462,7 @@ async function finishActiveSignalLog() {
   signalRunning = false;
   activeSignal = null;
 
-  return null;
+  return finishingSignal;
 }
 
 function enrichArchive(group) {
@@ -889,7 +910,7 @@ function formatWatchPrice(value) {
 
   if (!Number.isFinite(number)) return "-";
 
-  return Math.round(number).toFixed(2);
+  return String(Math.round(number));
 }
 
 function mapTradeWatch(row) {
@@ -1585,14 +1606,6 @@ async function checkTradeWatchOnce(options = {}) {
     if (error) throw error;
     if (!watch) return;
     if (!botEnabled) return;
-
-    const scheduleState = getAutoScheduleState();
-
-    if (!scheduleState.isOpen) {
-      // 자동 잠금 시간에는 감시 상태를 삭제하지 않고 판단만 잠시 멈춥니다.
-      // 운영 시간이 다시 시작되면 기존 감시가 그대로 재개됩니다.
-      return;
-    }
 
     const priceData = options.priceData || (await fetchXauUsdPrice());
 
