@@ -95,13 +95,19 @@ function getAutoScheduleState() {
 
   const minutes = hour * 60 + minute;
 
+  // 신규 신호 수신 시간(KST)
+  // 08:00 ~ 22:00 수신 가능
+  // 22:00 ~ 23:00 중간 자동 잠금
+  // 23:00 ~ 01:00 수신 가능
+  // 01:00 ~ 08:00 자동 잠금
+  // 이미 진행 중인 포지션의 진입가/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
   const openStart1 = 8 * 60;
-  const openEnd1 = 10 * 60;
+  const openEnd1 = 22 * 60;
 
-  const lockStart = 10 * 60;
-  const lockEnd = 11 * 60;
+  const lockStart = 22 * 60;
+  const lockEnd = 23 * 60;
 
-  const openStart2 = 11 * 60;
+  const openStart2 = 23 * 60;
   const lockStart2 = 1 * 60;
 
   const isFirstOpen = minutes >= openStart1 && minutes < openEnd1;
@@ -1618,74 +1624,6 @@ function getTpForWatchStage({
   return firstTp;
 }
 
-async function finishSignalLogById(signalId) {
-  if (!signalId) {
-    throw new Error("자동 종료할 신호 ID가 없습니다.");
-  }
-
-  const db = requireSupabase();
-  const endedAt = getTimeText();
-
-  const { data: updatedRow, error: updateError } = await db
-    .from("signal_logs")
-    .update({
-      status: "종료",
-      ended_at: endedAt,
-    })
-    .eq("id", signalId)
-    .eq("log_type", "sent")
-    .eq("status", "진행중")
-    .select("*")
-    .maybeSingle();
-
-  if (updateError) throw updateError;
-
-  let closedRow = updatedRow;
-
-  // 첫 시도에서 이미 종료됐거나 다른 동일 요청이 먼저 끝냈다면,
-  // 같은 신호 ID의 실제 상태만 확인합니다. 다른 새 신호는 절대 건드리지 않습니다.
-  if (!closedRow) {
-    const { data: existingRow, error: readError } = await db
-      .from("signal_logs")
-      .select("*")
-      .eq("id", signalId)
-      .eq("log_type", "sent")
-      .maybeSingle();
-
-    if (readError) throw readError;
-
-    if (!existingRow) {
-      throw new Error("자동 종료 대상 신호를 찾지 못했습니다.");
-    }
-
-    if (existingRow.status !== "종료") {
-      throw new Error("자동 종료 대상 신호가 아직 진행중입니다.");
-    }
-
-    closedRow = existingRow;
-  }
-
-  // 종료한 바로 그 신호에 연결된 잠금만 제거합니다.
-  // 새 신호의 잠금이나 다른 날짜 잠금은 삭제하지 않습니다.
-  const { error: lockError } = await db
-    .from("signal_locks")
-    .delete()
-    .eq("signal_log_id", signalId);
-
-  if (lockError) throw lockError;
-
-  await syncSignalLogsFromDb();
-
-  if (
-    activeSignal &&
-    String(activeSignal.id) === String(signalId)
-  ) {
-    throw new Error("자동 종료 후에도 같은 신호가 진행중으로 남아 있습니다.");
-  }
-
-  return mapSentLog(closedRow);
-}
-
 async function finishPositionAfterAutomaticExit(reason) {
   // TP/SL 선점 단계에서 이미 감시를 비활성화하지만,
   // 한 번 더 명시적으로 중지해 상태가 남지 않도록 합니다.
@@ -1698,37 +1636,23 @@ async function finishPositionAfterAutomaticExit(reason) {
     );
   }
 
-  // 종료 대상은 이 순간의 진행중 신호 ID로 한 번만 고정합니다.
-  // 재시도 중 새 신호가 들어와도 종료 대상이 바뀌지 않습니다.
-  await syncSignalLogsFromDb();
-
-  const targetSignalId = activeSignal?.id || null;
-
-  if (!targetSignalId) {
-    console.log(`${reason} 도달 감시는 중지됐지만 종료할 진행중 신호가 없습니다.`);
-    return null;
-  }
-
   let lastError = null;
 
-  // 재시도는 같은 signalId의 DB 상태 변경만 반복합니다.
-  // 텔레그램 메시지는 이 함수 밖에서 이미 1번만 발송됩니다.
+  // 일시적인 Supabase 오류가 있어도 포지션 종료를 최대 3번 재시도합니다.
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const finishedSignal = await finishSignalLogById(targetSignalId);
+      const finishedSignal = await finishActiveSignalLog();
 
       botEnabled = true;
+
       await syncSignalLogsFromDb();
 
-      if (
-        activeSignal &&
-        String(activeSignal.id) === String(targetSignalId)
-      ) {
-        throw new Error("포지션 종료 후 같은 신호가 진행중으로 남아 있습니다.");
+      if (signalRunning || activeSignal) {
+        throw new Error("포지션 종료 후 진행중 상태가 남아 있습니다.");
       }
 
       console.log(
-        `${reason} 도달로 자동 감시 중지 및 포지션 종료 완료: ${targetSignalId}`
+        `${reason} 도달로 자동 감시 중지 및 포지션 종료 완료`
       );
 
       return finishedSignal;
@@ -1736,7 +1660,7 @@ async function finishPositionAfterAutomaticExit(reason) {
       lastError = error;
 
       console.error(
-        `${reason} 자동 포지션 종료 ${attempt}차 시도 실패 (${targetSignalId}):`,
+        `${reason} 자동 포지션 종료 ${attempt}차 시도 실패:`,
         error.message
       );
 
