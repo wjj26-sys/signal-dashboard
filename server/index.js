@@ -917,6 +917,47 @@ ${symbol}
 ※투자 관련 책임 / 권리는 투자자 본인에게`;
 }
 
+async function hasProcessedTelegramMessage(message) {
+  const sourceChatId = String(message?.chat?.id ?? "");
+  const sourceMessageId = message?.message_id;
+
+  if (!sourceChatId || sourceMessageId === undefined || sourceMessageId === null) {
+    return false;
+  }
+
+  // Supabase를 사용하지 않는 로컬 상태용 중복 확인
+  if (!supabase) {
+    const allSignals = [...sentSignals, ...blockedSignals];
+
+    return allSignals.some((item) => {
+      const savedChatId = String(
+        item.sourceChatId ?? item.source_chat_id ?? ""
+      );
+
+      const savedMessageId =
+        item.sourceMessageId ??
+        item.messageId ??
+        item.source_message_id;
+
+      return (
+        savedChatId === sourceChatId &&
+        String(savedMessageId) === String(sourceMessageId)
+      );
+    });
+  }
+
+  const { data, error } = await supabase
+    .from("signal_logs")
+    .select("id, log_type, status")
+    .eq("source_chat_id", sourceChatId)
+    .eq("source_message_id", sourceMessageId)
+    .limit(1);
+
+  if (error) throw error;
+
+  return Array.isArray(data) && data.length > 0;
+}
+
 async function addBlockedSignal(message, reason, sourceRoom) {
   const direction = getSignalDirection(message);
 
@@ -943,6 +984,18 @@ async function handleSignalMessage(message) {
   }
 
   if (!isSignalMessage(message)) {
+    return;
+  }
+
+  // 같은 원본방 + 같은 Telegram message_id는 한 번만 처리
+  const alreadyProcessed = await hasProcessedTelegramMessage(message);
+
+  if (alreadyProcessed) {
+    console.log("중복 텔레그램 메시지 무시:", {
+      sourceChatId,
+      sourceMessageId: message.message_id,
+    });
+
     return;
   }
 
