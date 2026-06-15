@@ -142,15 +142,196 @@ function getMessageText(message) {
 function getSignalDirection(message) {
   const text = getMessageText(message).toUpperCase();
 
-  if (text.includes("BUY") || text.includes("LONG") || text.includes("롱")) {
+  if (
+    text.includes("BUY") ||
+    text.includes("LONG") ||
+    text.includes("롱") ||
+    text.includes("상승")
+  ) {
     return "BUY";
   }
 
-  if (text.includes("SELL") || text.includes("SHORT") || text.includes("숏")) {
+  if (
+    text.includes("SELL") ||
+    text.includes("SHORT") ||
+    text.includes("숏") ||
+    text.includes("하락")
+  ) {
     return "SELL";
   }
 
   return "";
+}
+
+function parseSignalNumber(text, pattern) {
+  const match = String(text || "").match(pattern);
+
+  if (!match?.[1]) return null;
+
+  const number = Number(String(match[1]).replace(/,/g, ""));
+
+  return Number.isFinite(number) ? number : null;
+}
+
+function roundAutoTpPrice(direction, value) {
+  const price = Number(value);
+
+  if (!Number.isFinite(price)) return null;
+
+  if (direction === "SHORT") {
+    return Math.floor(price);
+  }
+
+  return Math.ceil(price);
+}
+
+function hasTradeSetupText(message) {
+  const text = getMessageText(message);
+
+  if (!text) return false;
+
+  const hasSymbol = /XAUUSD|GOLD/i.test(text);
+  const hasEntry1 = /1\s*차\s*진입가/i.test(text);
+  const hasEntry2 = /2\s*차\s*진입가/i.test(text);
+  const hasEntry3 = /3\s*차\s*진입가/i.test(text);
+  const hasTp = /TP|익절가/i.test(text);
+  const hasSl = /SL|손절가/i.test(text);
+
+  return (
+    hasSymbol &&
+    hasEntry1 &&
+    hasEntry2 &&
+    hasEntry3 &&
+    hasTp &&
+    hasSl
+  );
+}
+
+function parseTelegramTradeSetup(message) {
+  const text = getMessageText(message);
+  const upperText = String(text || "").toUpperCase();
+
+  let direction = null;
+
+  if (
+    upperText.includes("상승") ||
+    upperText.includes("BUY") ||
+    upperText.includes("LONG") ||
+    upperText.includes("롱")
+  ) {
+    direction = "LONG";
+  }
+
+  if (
+    upperText.includes("하락") ||
+    upperText.includes("SELL") ||
+    upperText.includes("SHORT") ||
+    upperText.includes("숏")
+  ) {
+    direction = "SHORT";
+  }
+
+  const baseEntry = parseSignalNumber(
+    text,
+    /1\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+  );
+
+  const entry2 = parseSignalNumber(
+    text,
+    /2\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+  );
+
+  const entry3 = parseSignalNumber(
+    text,
+    /3\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+  );
+
+  const firstTp = parseSignalNumber(
+    text,
+    /(?:TP\s*(?:\(\s*익절가\s*\))?|익절가)\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+  );
+
+  const slPrice = parseSignalNumber(
+    text,
+    /(?:SL\s*(?:\(\s*손절가\s*\))?|손절가)\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+  );
+
+  const missingValues = [];
+
+  if (!direction) missingValues.push("방향");
+  if (baseEntry === null) missingValues.push("1차 진입가");
+  if (entry2 === null) missingValues.push("2차 진입가");
+  if (entry3 === null) missingValues.push("3차 진입가");
+  if (firstTp === null) missingValues.push("TP");
+  if (slPrice === null) missingValues.push("손절가");
+
+  if (missingValues.length > 0) {
+    return {
+      ok: false,
+      error: `자동 추출 실패: ${missingValues.join(", ")} 값을 찾지 못했습니다.`,
+    };
+  }
+
+  const tpGap = Math.abs(firstTp - baseEntry);
+
+  if (!Number.isFinite(tpGap) || tpGap <= 0) {
+    return {
+      ok: false,
+      error: "자동 추출 실패: TP 간격이 올바르지 않습니다.",
+    };
+  }
+
+  const isLong = direction === "LONG";
+
+  const validPriceOrder = isLong
+    ? entry2 <= baseEntry &&
+      entry3 <= entry2 &&
+      firstTp > baseEntry &&
+      slPrice < entry3
+    : entry2 >= baseEntry &&
+      entry3 >= entry2 &&
+      firstTp < baseEntry &&
+      slPrice > entry3;
+
+  if (!validPriceOrder) {
+    return {
+      ok: false,
+      error:
+        "자동 추출 실패: 방향과 진입가·TP·손절가의 가격 순서가 맞지 않습니다.",
+    };
+  }
+
+  const sign = isLong ? 1 : -1;
+
+  const secondAverage = (baseEntry + entry2) / 2;
+  const secondTp = roundAutoTpPrice(
+    direction,
+    secondAverage + sign * tpGap
+  );
+
+  const thirdAverage = (baseEntry + entry2 + entry3 * 2) / 4;
+
+  return {
+    ok: true,
+    setup: {
+      tradeDate: getTodayLogDate(),
+      symbol: "XAUUSD",
+      direction,
+      baseEntry,
+      entry2,
+      entry3,
+      tpGap,
+      firstTp,
+      secondAverage,
+      secondTp,
+      thirdAverage,
+
+      // 우리가 정한 규칙: 3차 TP는 2차 진입가
+      thirdTp: entry2,
+
+      slPrice,
+    },
+  };
 }
 
 function hasSignalImage(message) {
@@ -164,7 +345,7 @@ function hasSignalImage(message) {
 }
 
 function isSignalMessage(message) {
-  return hasSignalImage(message);
+  return hasSignalImage(message) || hasTradeSetupText(message);
 }
 
 function getSourceRoom(sourceChatId) {
@@ -838,6 +1019,30 @@ async function handleSignalMessage(message) {
     activeSignal = savedSignal;
 
     console.log("신호 전달 완료:", savedSignal);
+
+    try {
+      const autoResult = await saveSetupAndStartWatchFromTelegram(message);
+
+      console.log("텔레그램 계산값 자동 저장 완료:", {
+        direction: autoResult.setup.direction,
+        baseEntry: autoResult.setup.base_entry,
+        entry2: autoResult.setup.entry2,
+        entry3: autoResult.setup.entry3,
+        firstTp: autoResult.setup.first_tp,
+        secondTp: autoResult.setup.second_tp,
+        thirdTp: autoResult.setup.third_tp,
+        slPrice: autoResult.setup.sl_price,
+      });
+
+      console.log("텔레그램 신호 자동 감시 시작 완료");
+    } catch (autoError) {
+      // 값 추출이 실패해도 원본 신호 전달과 포지션 기록은 유지합니다.
+      // 잘못된 금액으로 감시를 시작하는 것만 방지합니다.
+      console.error(
+        "텔레그램 계산값 자동 입력/감시 시작 실패:",
+        autoError.message
+      );
+    }
   } catch (error) {
     await releaseTodaySignalLock();
     throw error;
@@ -874,6 +1079,118 @@ function toNullableNumber(value) {
   const number = Number(value);
 
   return Number.isFinite(number) ? number : null;
+}
+
+async function saveAutomaticTradeSetup(setup) {
+  const db = requireSupabase();
+
+  const { data, error } = await db
+    .from("trade_setups")
+    .upsert(
+      {
+        setup_key: "current",
+        trade_date: setup.tradeDate || getTodayLogDate(),
+        symbol: setup.symbol || "XAUUSD",
+        direction: setup.direction || "LONG",
+        base_entry: toNullableNumber(setup.baseEntry),
+        entry2: toNullableNumber(setup.entry2),
+        entry3: toNullableNumber(setup.entry3),
+        tp_gap: toNullableNumber(setup.tpGap),
+        first_tp: toNullableNumber(setup.firstTp),
+        second_average: toNullableNumber(setup.secondAverage),
+        second_tp: toNullableNumber(setup.secondTp),
+        third_average: toNullableNumber(setup.thirdAverage),
+
+        // 3차 TP = 2차 진입가
+        third_tp: toNullableNumber(setup.thirdTp),
+
+        sl_price: toNullableNumber(setup.slPrice),
+      },
+      {
+        onConflict: "setup_key",
+      }
+    )
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  return data;
+}
+
+async function startAutomaticTradeWatch(setupRow) {
+  const db = requireSupabase();
+
+  const entry2 = toWatchNumber(setupRow.entry2);
+  const entry3 = toWatchNumber(setupRow.entry3);
+  const firstTp = toWatchNumber(setupRow.first_tp);
+  const secondTp = toWatchNumber(setupRow.second_tp);
+  const thirdTp = toWatchNumber(setupRow.third_tp);
+  const slPrice = toWatchNumber(setupRow.sl_price);
+
+  if (
+    entry2 === null ||
+    entry3 === null ||
+    firstTp === null ||
+    secondTp === null ||
+    thirdTp === null ||
+    slPrice === null
+  ) {
+    throw new Error(
+      "자동 감시 시작 실패: 진입가·TP·손절가 중 비어 있는 값이 있습니다."
+    );
+  }
+
+  const { data, error } = await db
+    .from("trade_watch_state")
+    .upsert(
+      {
+        watch_key: "current",
+        is_active: true,
+        symbol: setupRow.symbol || "XAUUSD",
+        direction: setupRow.direction || "LONG",
+        entry2,
+        entry3,
+        first_tp: firstTp,
+        second_tp: secondTp,
+        third_tp: thirdTp,
+        sl_price: slPrice,
+        active_tp: firstTp,
+        sent_entry2: false,
+        sent_entry3: false,
+        sent_tp: false,
+        sent_sl: false,
+        last_price: null,
+        last_checked_at: null,
+        started_at: new Date().toISOString(),
+        stopped_at: null,
+      },
+      {
+        onConflict: "watch_key",
+      }
+    )
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  return data;
+}
+
+async function saveSetupAndStartWatchFromTelegram(message) {
+  const parsed = parseTelegramTradeSetup(message);
+
+  if (!parsed.ok) {
+    throw new Error(parsed.error);
+  }
+
+  const savedSetup = await saveAutomaticTradeSetup(parsed.setup);
+  const startedWatch = await startAutomaticTradeWatch(savedSetup);
+
+  return {
+    setup: savedSetup,
+    watch: startedWatch,
+  };
 }
 
 app.get("/api/trade-setup", async (req, res) => {

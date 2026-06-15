@@ -967,6 +967,15 @@ const calcText = useMemo(() => {
   }, []);
 
   useEffect(() => {
+    const activeSignalId = serverStatus?.activeSignal?.id;
+
+    if (!activeSignalId) return;
+
+    fetchTradeSetup();
+    fetchTradeWatch();
+  }, [serverStatus?.activeSignal?.id]);
+
+  useEffect(() => {
     if (!serverStatus) return;
 
     const serverSignals = serverStatus.sentSignals || [];
