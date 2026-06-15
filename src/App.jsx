@@ -158,35 +158,36 @@ function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
   const e2 = Number(entry2);
   const e3 = Number(entry3);
   const gap = Number(tpGap);
-  const normalizedDirection = String(direction || "").toUpperCase();
-  const sign =
-    normalizedDirection === "SHORT" || normalizedDirection === "SELL" ? -1 : 1;
 
+  const normalizedDirection = String(direction || "").toUpperCase();
+
+  const sign =
+    normalizedDirection === "SHORT" || normalizedDirection === "SELL"
+      ? -1
+      : 1;
+
+  // 1차 TP = 1차 진입가 ± TP 간격
   const rawFirstTp =
     Number.isFinite(base) && Number.isFinite(gap)
       ? base + sign * gap
       : null;
 
-  // 1차 1랏 + 2차 1랏
+  // 2차 평균가 = 1차 1랏 + 2차 1랏
   const secondAverage =
     Number.isFinite(base) && Number.isFinite(e2)
       ? (base + e2) / 2
       : null;
 
+  // 2차 TP = 2차 평균가 ± TP 간격
   const rawSecondTp =
     secondAverage !== null && Number.isFinite(gap)
       ? secondAverage + sign * gap
       : null;
 
-  // 1차 1랏 + 2차 1랏 + 3차 2랏
+  // 3차 평균가는 기존 기록 및 계산용으로 유지
   const thirdAverage =
     Number.isFinite(base) && Number.isFinite(e2) && Number.isFinite(e3)
       ? (base + e2 + e3 * 2) / 4
-      : null;
-
-  const rawThirdTp =
-    thirdAverage !== null && Number.isFinite(gap)
-      ? thirdAverage + sign * gap
       : null;
 
   return {
@@ -194,7 +195,9 @@ function calculateTp({ direction, baseEntry, entry2, entry3, tpGap }) {
     secondAverage,
     secondTp: roundTpPrice(direction, rawSecondTp),
     thirdAverage,
-    thirdTp: roundTpPrice(direction, rawThirdTp),
+
+    // 3차 TP는 2차 진입가와 동일
+    thirdTp: Number.isFinite(e2) ? e2 : null,
   };
 }
 
@@ -1695,8 +1698,8 @@ const calcText = useMemo(() => {
             </div>
 
             <p className="muted-note">
-              계산식: 1차와 2차는 1랏, 3차는 2랏 기준입니다. 롱은 평균가 + TP
-              간격, 숏은 평균가 - TP 간격으로 계산합니다.
+              계산식: 1차 TP는 1차 진입가, 2차 TP는 1·2차 평균가에 TP 간격을
+              적용하며, 3차 TP는 2차 진입가와 동일합니다.
             </p>
           </div>
 
