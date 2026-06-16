@@ -74,8 +74,34 @@ function toDateText(date) {
   return `${year}-${month}-${day}`;
 }
 
-function getTodayLogDate() {
+function getCalendarDate() {
   return toDateText(getKstNow());
+}
+
+// 매매 기록 날짜만 오전 8시에 변경합니다.
+// 운영시간·잠금시간·텔레그램 발송시간에는 영향을 주지 않습니다.
+function getTodayLogDate() {
+  const now = getKstNow();
+
+  if (now.getHours() < 8) {
+    now.setDate(now.getDate() - 1);
+  }
+
+  return toDateText(now);
+}
+
+// signal_locks는 실제 달력 날짜 기준으로 유지해 운영 잠금 로직을 바꾸지 않습니다.
+function getSignalLockDate() {
+  return getCalendarDate();
+}
+
+// 새벽 1시~오전 8시는 진행 중 포지션의 결과(TP/SL)만 전송합니다.
+// 진입 단계는 내부 기록만 갱신하고 2차·3차 진입 메시지는 보내지 않습니다.
+function isResultOnlyTime() {
+  const now = getKstNow();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+
+  return minutes >= 1 * 60 && minutes < 8 * 60;
 }
 
 function getWeekKey(dateText) {
@@ -453,7 +479,7 @@ async function syncSignalLogsFromDb() {
 }
 
 async function releaseTodaySignalLock(
-  lockDate = getTodayLogDate()
+  lockDate = getSignalLockDate()
 ) {
   if (!supabase) return;
 
@@ -466,7 +492,7 @@ async function releaseTodaySignalLock(
 }
 
 async function acquireTodaySignalLock(payload) {
-  const today = getTodayLogDate();
+  const today = getSignalLockDate();
 
   if (!supabase) {
     return {
@@ -513,7 +539,7 @@ async function attachSignalLogToLock(signalLogId) {
     .update({
       signal_log_id: signalLogId,
     })
-    .eq("lock_date", getTodayLogDate());
+    .eq("lock_date", getSignalLockDate());
 
   if (error) throw error;
 }
@@ -607,7 +633,6 @@ async function finishActiveSignalLog() {
   }
 
   const finishingSignal = activeSignal;
-  const signalLogDate = finishingSignal.logDate || getTodayLogDate();
 
   if (supabase) {
     const { data: updatedRow, error: updateError } = await supabase
@@ -656,12 +681,9 @@ async function finishActiveSignalLog() {
 
     if (lockBySignalError) throw lockBySignalError;
 
-    await releaseTodaySignalLock(signalLogDate);
-
-    // 날짜가 넘어간 포지션이라면 현재 날짜에 남은 잠금도 함께 정리합니다.
-    if (signalLogDate !== getTodayLogDate()) {
-      await releaseTodaySignalLock();
-    }
+    // signal_locks는 실제 달력 날짜 기준입니다.
+    // 해당 시그널 ID 잠금을 먼저 지웠고, 현재 달력 날짜의 잔여 잠금도 정리합니다.
+    await releaseTodaySignalLock();
 
     await syncSignalLogsFromDb();
 
@@ -1994,7 +2016,334 @@ function getTpForWatchStage({
   return firstTp;
 }
 
-async function finishPositionAfterAutomaticExit(reason) {
+const AUTO_POSITION_LOTS = {
+  1: 1,
+  2: 1,
+  3: 2,
+};
+
+const XAUUSD_VALUE_PER_LOT = 100;
+
+function calculateAutomaticPositionAmount({
+  direction,
+  entryPrice,
+  exitPrice,
+  lot,
+}) {
+  const entry = toWatchNumber(entryPrice);
+  const exit = toWatchNumber(exitPrice);
+  const parsedLot = toWatchNumber(lot);
+
+  if (entry === null || exit === null || parsedLot === null) {
+    return 0;
+  }
+
+  const normalizedDirection = String(direction || "").toUpperCase();
+
+  const priceDifference =
+    normalizedDirection === "SHORT" || normalizedDirection === "SELL"
+      ? entry - exit
+      : exit - entry;
+
+  return Math.round(
+    priceDifference * parsedLot * XAUUSD_VALUE_PER_LOT
+  );
+}
+
+function getAutomaticPositionResult(amount, forceLoss = false) {
+  if (forceLoss) return "손절 🔴";
+  if (amount > 0) return "수익 🟢";
+  if (amount < 0) return "손절 🔴";
+  return "보합 🟡";
+}
+
+function formatAutomaticMoney(amount, result = "") {
+  const number = Number(String(amount ?? "").replace(/[^\d.]/g, ""));
+
+  if (!Number.isFinite(number)) return "";
+
+  const sign = String(result).includes("손절") ? "-" : "+";
+  const absolute = String(Math.abs(Math.round(number)));
+
+  return `${sign}$${absolute}`;
+}
+
+function buildAutomaticPositionResults({
+  setup,
+  watch,
+  exitPrice,
+  reason,
+}) {
+  const enteredRound = getConfirmedWatchStage(watch);
+  const forceLoss = String(reason || "").toUpperCase() === "SL";
+
+  const rounds = [
+    {
+      round: 1,
+      roundText: "1차",
+      entryPrice: setup?.base_entry,
+      lot: AUTO_POSITION_LOTS[1],
+    },
+    {
+      round: 2,
+      roundText: "2차",
+      entryPrice: setup?.entry2,
+      lot: AUTO_POSITION_LOTS[2],
+    },
+    {
+      round: 3,
+      roundText: "3차",
+      entryPrice: setup?.entry3,
+      lot: AUTO_POSITION_LOTS[3],
+    },
+  ];
+
+  return rounds.map((item) => {
+    if (item.round > enteredRound) {
+      return {
+        round: item.roundText,
+        result: "미진입",
+        amount: "",
+      };
+    }
+
+    let amount = calculateAutomaticPositionAmount({
+      direction: setup?.direction,
+      entryPrice: item.entryPrice,
+      exitPrice,
+      lot: item.lot,
+    });
+
+    if (forceLoss) {
+      amount = -Math.abs(amount);
+    }
+
+    return {
+      round: item.roundText,
+      result: getAutomaticPositionResult(amount, forceLoss),
+      amount: String(Math.abs(Math.round(amount))),
+    };
+  });
+}
+
+function makeAutomaticResultSummary(positions) {
+  const moneyResults = (positions || [])
+    .filter((position) => String(position.amount || "").trim() !== "")
+    .map((position) =>
+      formatAutomaticMoney(position.amount, position.result)
+    );
+
+  return moneyResults.length > 0
+    ? moneyResults.join(" / ")
+    : "확인중";
+}
+
+function makeAutomaticPositionRecordText(rows, recordDate, symbol) {
+  const completedRows = (rows || []).filter(
+    (row) =>
+      row.status === "종료" &&
+      Array.isArray(row.positions_json) &&
+      row.positions_json.length > 0
+  );
+
+  if (completedRows.length === 0) return "";
+
+  const body = completedRows
+    .map((row) => {
+      const orderText =
+        row.order_text ||
+        `${orderNames[(row.signal_order || 1) - 1] || `${row.signal_order}번째`} 시그널`;
+
+      const positionLines = row.positions_json
+        .map((position) => {
+          if (position.result === "미진입") {
+            return `${position.round} ${symbol} 미진입`;
+          }
+
+          if (String(position.amount || "").trim() === "") {
+            return `${position.round} ${symbol} ${position.result}`;
+          }
+
+          return `${position.round} ${symbol} ${position.result}: ${formatAutomaticMoney(
+            position.amount,
+            position.result
+          )}`;
+        })
+        .join("\n");
+
+      return `${orderText}\n${positionLines}`;
+    })
+    .join("\n\n");
+
+  return `[${recordDate} ${symbol}] 거래 결과\n\n${body}\n\n금일 매매결과 정리본 입니다`;
+}
+
+async function prepareAutomaticPositionResult({
+  reason,
+  exitPrice,
+  watch,
+}) {
+  const db = requireSupabase();
+  const parsedExitPrice = toWatchNumber(exitPrice);
+
+  if (parsedExitPrice === null) {
+    throw new Error("자동 결과 계산에 사용할 종료 가격이 없습니다.");
+  }
+
+  await syncSignalLogsFromDb();
+
+  const finishingSignal = activeSignal;
+
+  if (!finishingSignal) {
+    throw new Error("자동 결과를 적용할 진행 중 시그널이 없습니다.");
+  }
+
+  const setup = await getCurrentTradeSetup();
+
+  if (!setup) {
+    throw new Error("자동 결과 계산에 사용할 저장된 계산값이 없습니다.");
+  }
+
+  const positions = buildAutomaticPositionResults({
+    setup,
+    watch,
+    exitPrice: parsedExitPrice,
+    reason,
+  });
+
+  const resultSummary = makeAutomaticResultSummary(positions);
+
+  const { error } = await db
+    .from("signal_logs")
+    .update({
+      positions_json: positions,
+      result_summary: resultSummary,
+    })
+    .eq("id", finishingSignal.id)
+    .eq("log_type", "sent");
+
+  if (error) throw error;
+
+  return {
+    signalId: finishingSignal.id,
+    recordDate:
+      finishingSignal.logDate ||
+      setup.trade_date ||
+      getTodayLogDate(),
+    symbol: setup.symbol || "XAUUSD",
+    positions,
+    resultSummary,
+    exitPrice: parsedExitPrice,
+    reason,
+  };
+}
+
+async function saveAutomaticDailyPositionRecord(recordDate, symbol) {
+  const db = requireSupabase();
+
+  const { data: rows, error: rowsError } = await db
+    .from("signal_logs")
+    .select("*")
+    .eq("log_date", recordDate)
+    .eq("log_type", "sent")
+    .order("created_at", { ascending: true });
+
+  if (rowsError) throw rowsError;
+
+  const content = makeAutomaticPositionRecordText(
+    rows || [],
+    recordDate,
+    symbol
+  );
+
+  if (!content) {
+    throw new Error("자동 저장할 종료 포지션 기록이 없습니다.");
+  }
+
+  const weekKey = getWeekKey(recordDate);
+
+  const { data, error } = await db
+    .from("position_records")
+    .upsert(
+      {
+        record_date: recordDate,
+        symbol,
+        week_key: weekKey,
+        content,
+      },
+      {
+        onConflict: "record_date,symbol",
+      }
+    )
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  await cleanupOldPositionWeeks();
+
+  return data;
+}
+
+async function saveAutomaticDailyPositionRecordWithRetry(
+  recordDate,
+  symbol
+) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const savedRecord = await saveAutomaticDailyPositionRecord(
+        recordDate,
+        symbol
+      );
+
+      console.log(
+        `포지션 기록 자동 저장 완료: ${recordDate} ${symbol}`
+      );
+
+      return savedRecord;
+    } catch (error) {
+      lastError = error;
+
+      console.error(
+        `포지션 기록 자동 저장 ${attempt}차 시도 실패:`,
+        error.message
+      );
+
+      if (attempt < 3) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, attempt * 300)
+        );
+      }
+    }
+  }
+
+  throw lastError || new Error("포지션 기록 자동 저장에 실패했습니다.");
+}
+
+async function finishPositionAfterAutomaticExit(
+  reason,
+  {
+    watch = null,
+    exitPrice = null,
+  } = {}
+) {
+  let automaticResult = null;
+
+  try {
+    automaticResult = await prepareAutomaticPositionResult({
+      reason,
+      exitPrice,
+      watch,
+    });
+  } catch (resultError) {
+    console.error(
+      `${reason} 자동 결과 계산/저장 실패:`,
+      resultError.message
+    );
+  }
+
   // TP/SL 선점 단계에서 이미 감시를 비활성화하지만,
   // 한 번 더 명시적으로 중지해 상태가 남지 않도록 합니다.
   try {
@@ -2007,11 +2356,12 @@ async function finishPositionAfterAutomaticExit(reason) {
   }
 
   let lastError = null;
+  let finishedSignal = null;
 
   // 일시적인 Supabase 오류가 있어도 포지션 종료를 최대 3번 재시도합니다.
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const finishedSignal = await finishActiveSignalLog();
+      finishedSignal = await finishActiveSignalLog();
 
       botEnabled = true;
 
@@ -2025,7 +2375,7 @@ async function finishPositionAfterAutomaticExit(reason) {
         `${reason} 도달로 자동 감시 중지 및 포지션 종료 완료`
       );
 
-      return finishedSignal;
+      break;
     } catch (error) {
       lastError = error;
 
@@ -2040,7 +2390,18 @@ async function finishPositionAfterAutomaticExit(reason) {
     }
   }
 
-  throw lastError || new Error(`${reason} 자동 포지션 종료에 실패했습니다.`);
+  if (!finishedSignal && lastError) {
+    throw lastError;
+  }
+
+  if (automaticResult) {
+    await saveAutomaticDailyPositionRecordWithRetry(
+      automaticResult.recordDate,
+      automaticResult.symbol
+    );
+  }
+
+  return finishedSignal;
 }
 
 async function checkTradeWatchOnce(options = {}) {
@@ -2129,7 +2490,10 @@ async function checkTradeWatchOnce(options = {}) {
         console.error("SL 메시지 발송 실패:", error.message);
       }
 
-      await finishPositionAfterAutomaticExit("SL");
+      await finishPositionAfterAutomaticExit("SL", {
+        watch: claimedSl,
+        exitPrice: slPrice,
+      });
 
       if (sendError) throw sendError;
       return;
@@ -2159,6 +2523,13 @@ async function checkTradeWatchOnce(options = {}) {
       });
 
       if (!claimedEntry2) return;
+
+      if (isResultOnlyTime()) {
+        console.log(
+          "새벽 1시~오전 8시 결과 전용 시간: 2차 진입 단계만 기록하고 메시지는 생략합니다."
+        );
+        return;
+      }
 
       try {
         await sendWatchTelegramMessage(
@@ -2201,6 +2572,13 @@ async function checkTradeWatchOnce(options = {}) {
       });
 
       if (!claimedEntry3) return;
+
+      if (isResultOnlyTime()) {
+        console.log(
+          "새벽 1시~오전 8시 결과 전용 시간: 3차 진입 단계만 기록하고 메시지는 생략합니다."
+        );
+        return;
+      }
 
       try {
         await sendWatchTelegramMessage(
@@ -2276,7 +2654,10 @@ async function checkTradeWatchOnce(options = {}) {
         console.error("TP 메시지 발송 실패:", error.message);
       }
 
-      await finishPositionAfterAutomaticExit("TP");
+      await finishPositionAfterAutomaticExit("TP", {
+        watch: claimedTp,
+        exitPrice: confirmedTp,
+      });
 
       if (sendError) throw sendError;
       return;
@@ -2398,10 +2779,18 @@ app.post("/api/finish-signal", async (req, res) => {
     const marketExitAt = new Date().toISOString();
     const marketExitPrice = await getManualMarketExitPrice();
 
+    const db = requireSupabase();
+
+    const { data: watchSnapshot, error: watchReadError } = await db
+      .from("trade_watch_state")
+      .select("*")
+      .eq("watch_key", "current")
+      .maybeSingle();
+
+    if (watchReadError) throw watchReadError;
+
     // 종료 버튼을 누른 순간 가격을 감시 상태의 마지막 가격으로 남겨둡니다.
     if (marketExitPrice !== null) {
-      const db = requireSupabase();
-
       const { error: priceUpdateError } = await db
         .from("trade_watch_state")
         .update({
@@ -2417,12 +2806,36 @@ app.post("/api/finish-signal", async (req, res) => {
       await sendCloseMarketMessage();
     }
 
+    let automaticResult = null;
+
+    if (activeSignal && marketExitPrice !== null) {
+      try {
+        automaticResult = await prepareAutomaticPositionResult({
+          reason: "시장가",
+          exitPrice: marketExitPrice,
+          watch: watchSnapshot,
+        });
+      } catch (resultError) {
+        console.error(
+          "시장가 종료 자동 결과 계산/저장 실패:",
+          resultError.message
+        );
+      }
+    }
+
     await finishActiveSignalLog();
     await stopTradeWatchState("finish_signal");
 
     signalRunning = false;
     activeSignal = null;
     botEnabled = true;
+
+    if (automaticResult) {
+      await saveAutomaticDailyPositionRecordWithRetry(
+        automaticResult.recordDate,
+        automaticResult.symbol
+      );
+    }
 
     await syncSignalLogsFromDb();
 
@@ -2432,6 +2845,7 @@ app.post("/api/finish-signal", async (req, res) => {
       closedSignalId,
       marketExitPrice,
       marketExitAt,
+      automaticRecordSaved: Boolean(automaticResult),
       botEnabled,
       signalRunning,
       canReceiveSignal: true,

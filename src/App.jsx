@@ -26,10 +26,22 @@ const orderNames = [
 ];
 
 function getTodayText() {
-  const now = new Date();
+  // 매매 기록 날짜만 한국시간 오전 8시에 변경합니다.
+  // 운영시간·잠금시간·메시지 발송시간에는 영향을 주지 않습니다.
+  const now = new Date(
+    new Date().toLocaleString("en-US", {
+      timeZone: "Asia/Seoul",
+    })
+  );
+
+  if (now.getHours() < 8) {
+    now.setDate(now.getDate() - 1);
+  }
+
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const date = String(now.getDate()).padStart(2, "0");
+
   return `${year}-${month}-${date}`;
 }
 
@@ -915,19 +927,26 @@ const calcText = useMemo(() => {
   }, [archives, selectedArchiveKey]);
 
   useEffect(() => {
-    let lastDate = getTodayText();
+    const syncRecordDate = () => {
+      // 진행 중 포지션은 시작 당시 기록 날짜를 끝까지 유지합니다.
+      if (serverStatus?.activeSignal) return;
 
-    const timer = setInterval(() => {
-      const today = getTodayText();
+      const recordDate = serverStatus?.logDate || getTodayText();
 
-      if (today !== lastDate) {
-        lastDate = today;
-        setTradeDate(today);
-      }
-    }, 60000);
+      setTradeDate((prev) =>
+        prev === recordDate ? prev : recordDate
+      );
+    };
+
+    syncRecordDate();
+
+    const timer = setInterval(syncRecordDate, 60000);
 
     return () => clearInterval(timer);
-  }, []);
+  }, [
+    serverStatus?.activeSignal?.id,
+    serverStatus?.logDate,
+  ]);
 
   useEffect(() => {
     fetchServerStatus();
@@ -1029,6 +1048,31 @@ const calcText = useMemo(() => {
       }
     }
   }, [serverStatus, selectedSignalId]);
+
+  useEffect(() => {
+    if (!selectedSignal) return;
+    if (selectedSignal.status !== "종료") return;
+
+    const positions = selectedSignal.positions;
+
+    if (!Array.isArray(positions) || positions.length === 0) return;
+
+    if (
+      selectedSignal.result === "확인중" ||
+      selectedSignal.result === "결과 입력 필요"
+    ) {
+      return;
+    }
+
+    // 서버가 TP/SL/시장가 종료 결과를 자동 계산하면
+    // 포지션 선택 패널과 저장함을 바로 새 결과로 갱신합니다.
+    setPositionDraft(clonePositions(positions));
+    fetchPositionRecords();
+  }, [
+    selectedSignal?.id,
+    selectedSignal?.status,
+    selectedSignal?.result,
+  ]);
 
   const finishCurrentSignal = () => {
     if (!currentSignal) {
