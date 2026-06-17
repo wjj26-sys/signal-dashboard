@@ -1690,7 +1690,7 @@ const calcText = useMemo(() => {
               />
             </div>
 
-            <div className="calc-result-grid">
+            <div className="calc-result-grid two">
               <div className="calc-box">
                 <p>1차 TP</p>
                 <strong>{formatNumber(calc.firstTp)}</strong>

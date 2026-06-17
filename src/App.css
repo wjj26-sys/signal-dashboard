@@ -374,6 +374,9 @@ h2 {
 
 .calc-result-grid.two {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 220px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .calc-box {
