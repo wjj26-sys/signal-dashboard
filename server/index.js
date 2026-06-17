@@ -96,7 +96,7 @@ function getSignalLockDate() {
 }
 
 // 새벽 1시~오전 8시는 진행 중 포지션의 결과(TP/SL)만 전송합니다.
-// 진입 단계는 내부 기록만 갱신하고 2차·3차 진입 메시지는 보내지 않습니다.
+// 진입 단계는 내부 기록만 갱신하고 2차 진입 메시지는 보내지 않습니다.
 function isResultOnlyTime() {
   const now = getKstNow();
   const minutes = now.getHours() * 60 + now.getMinutes();
@@ -219,18 +219,10 @@ function hasTradeSetupText(message) {
   const hasSymbol = /XAUUSD|GOLD/i.test(text);
   const hasEntry1 = /1\s*차\s*진입가/i.test(text);
   const hasEntry2 = /2\s*차\s*진입가/i.test(text);
-  const hasEntry3 = /3\s*차\s*진입가/i.test(text);
   const hasTp = /TP|익절가/i.test(text);
   const hasSl = /SL|손절가/i.test(text);
 
-  return (
-    hasSymbol &&
-    hasEntry1 &&
-    hasEntry2 &&
-    hasEntry3 &&
-    hasTp &&
-    hasSl
-  );
+  return hasSymbol && hasEntry1 && hasEntry2 && hasTp && hasSl;
 }
 
 function parseTelegramTradeSetup(message) {
@@ -267,11 +259,6 @@ function parseTelegramTradeSetup(message) {
     /2\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
   );
 
-  const entry3 = parseSignalNumber(
-    text,
-    /3\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
-  );
-
   const firstTp = parseSignalNumber(
     text,
     /(?:TP\s*(?:\(\s*익절가\s*\))?|익절가)\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
@@ -287,7 +274,6 @@ function parseTelegramTradeSetup(message) {
   if (!direction) missingValues.push("방향");
   if (baseEntry === null) missingValues.push("1차 진입가");
   if (entry2 === null) missingValues.push("2차 진입가");
-  if (entry3 === null) missingValues.push("3차 진입가");
   if (firstTp === null) missingValues.push("TP");
   if (slPrice === null) missingValues.push("손절가");
 
@@ -310,14 +296,8 @@ function parseTelegramTradeSetup(message) {
   const isLong = direction === "LONG";
 
   const validPriceOrder = isLong
-    ? entry2 <= baseEntry &&
-      entry3 <= entry2 &&
-      firstTp > baseEntry &&
-      slPrice < entry3
-    : entry2 >= baseEntry &&
-      entry3 >= entry2 &&
-      firstTp < baseEntry &&
-      slPrice > entry3;
+    ? entry2 <= baseEntry && firstTp > baseEntry && slPrice < entry2
+    : entry2 >= baseEntry && firstTp < baseEntry && slPrice > entry2;
 
   if (!validPriceOrder) {
     return {
@@ -329,13 +309,12 @@ function parseTelegramTradeSetup(message) {
 
   const sign = isLong ? 1 : -1;
 
-  const secondAverage = (baseEntry + entry2) / 2;
+  // 새 비중: 1차 2랏 + 2차 1랏
+  const secondAverage = (baseEntry * 2 + entry2) / 3;
   const secondTp = roundAutoTpPrice(
     direction,
     secondAverage + sign * tpGap
   );
-
-  const thirdAverage = (baseEntry + entry2 + entry3 * 2) / 4;
 
   return {
     ok: true,
@@ -345,16 +324,10 @@ function parseTelegramTradeSetup(message) {
       direction,
       baseEntry,
       entry2,
-      entry3,
       tpGap,
       firstTp,
       secondAverage,
       secondTp,
-      thirdAverage,
-
-      // 우리가 정한 규칙: 3차 TP는 2차 진입가
-      thirdTp: entry2,
-
       slPrice,
     },
   };
@@ -1102,10 +1075,8 @@ async function handleSignalMessage(message) {
         direction: autoResult.setup.direction,
         baseEntry: autoResult.setup.base_entry,
         entry2: autoResult.setup.entry2,
-        entry3: autoResult.setup.entry3,
         firstTp: autoResult.setup.first_tp,
         secondTp: autoResult.setup.second_tp,
-        thirdTp: autoResult.setup.third_tp,
         slPrice: autoResult.setup.sl_price,
       });
 
@@ -1136,13 +1107,10 @@ function mapTradeSetup(row) {
     direction: row.direction || "LONG",
     baseEntry: row.base_entry ?? "",
     entry2: row.entry2 ?? "",
-    entry3: row.entry3 ?? "",
     tpGap: row.tp_gap ?? "",
     firstTp: row.first_tp ?? null,
     secondAverage: row.second_average ?? null,
     secondTp: row.second_tp ?? null,
-    thirdAverage: row.third_average ?? null,
-    thirdTp: row.third_tp ?? null,
     slPrice: row.sl_price ?? "",
     updatedAt: row.updated_at,
   };
@@ -1169,16 +1137,16 @@ async function saveAutomaticTradeSetup(setup) {
         direction: setup.direction || "LONG",
         base_entry: toNullableNumber(setup.baseEntry),
         entry2: toNullableNumber(setup.entry2),
-        entry3: toNullableNumber(setup.entry3),
+
+        // 기존 Supabase 컬럼은 그대로 두되 3차 로직에는 사용하지 않습니다.
+        entry3: toNullableNumber(setup.entry2),
+
         tp_gap: toNullableNumber(setup.tpGap),
         first_tp: toNullableNumber(setup.firstTp),
         second_average: toNullableNumber(setup.secondAverage),
         second_tp: toNullableNumber(setup.secondTp),
-        third_average: toNullableNumber(setup.thirdAverage),
-
-        // 3차 TP = 2차 진입가
-        third_tp: toNullableNumber(setup.thirdTp),
-
+        third_average: toNullableNumber(setup.secondAverage),
+        third_tp: toNullableNumber(setup.secondTp),
         sl_price: toNullableNumber(setup.slPrice),
       },
       {
@@ -1197,18 +1165,14 @@ async function startAutomaticTradeWatch(setupRow) {
   const db = requireSupabase();
 
   const entry2 = toWatchNumber(setupRow.entry2);
-  const entry3 = toWatchNumber(setupRow.entry3);
   const firstTp = toWatchNumber(setupRow.first_tp);
   const secondTp = toWatchNumber(setupRow.second_tp);
-  const thirdTp = toWatchNumber(setupRow.third_tp);
   const slPrice = toWatchNumber(setupRow.sl_price);
 
   if (
     entry2 === null ||
-    entry3 === null ||
     firstTp === null ||
     secondTp === null ||
-    thirdTp === null ||
     slPrice === null
   ) {
     throw new Error(
@@ -1225,10 +1189,13 @@ async function startAutomaticTradeWatch(setupRow) {
         symbol: setupRow.symbol || "XAUUSD",
         direction: setupRow.direction || "LONG",
         entry2,
-        entry3,
+
+        // 기존 DB 컬럼 호환용 값이며 실제 3차 진입은 처리하지 않습니다.
+        entry3: entry2,
+
         first_tp: firstTp,
         second_tp: secondTp,
-        third_tp: thirdTp,
+        third_tp: secondTp,
         sl_price: slPrice,
         active_tp: firstTp,
         sent_entry2: false,
@@ -1308,13 +1275,16 @@ app.post("/api/trade-setup", async (req, res) => {
           direction: payload.direction || "LONG",
           base_entry: toNullableNumber(payload.baseEntry),
           entry2: toNullableNumber(payload.entry2),
-          entry3: toNullableNumber(payload.entry3),
+
+          // 기존 Supabase 컬럼 호환용 값
+          entry3: toNullableNumber(payload.entry2),
+
           tp_gap: toNullableNumber(payload.tpGap),
           first_tp: toNullableNumber(payload.firstTp),
           second_average: toNullableNumber(payload.secondAverage),
           second_tp: toNullableNumber(payload.secondTp),
-          third_average: toNullableNumber(payload.thirdAverage),
-          third_tp: toNullableNumber(payload.thirdTp),
+          third_average: toNullableNumber(payload.secondAverage),
+          third_tp: toNullableNumber(payload.secondTp),
           sl_price: toNullableNumber(payload.slPrice),
         },
         {
@@ -1364,14 +1334,11 @@ function mapTradeWatch(row) {
     symbol: row.symbol || "XAUUSD",
     direction: row.direction || "LONG",
     entry2: row.entry2,
-    entry3: row.entry3,
     firstTp: row.first_tp,
     secondTp: row.second_tp,
-    thirdTp: row.third_tp,
     slPrice: row.sl_price,
     activeTp: row.active_tp,
     sentEntry2: row.sent_entry2,
-    sentEntry3: row.sent_entry3,
     sentTp: row.sent_tp,
     sentSl: row.sent_sl,
     lastPrice: row.last_price,
@@ -1874,16 +1841,19 @@ app.post("/api/trade-watch/start", async (req, res) => {
     }
 
     const entry2 = toWatchNumber(setup.entry2);
-    const entry3 = toWatchNumber(setup.entry3);
     const firstTp = toWatchNumber(setup.first_tp);
     const secondTp = toWatchNumber(setup.second_tp);
-    const thirdTp = toWatchNumber(setup.third_tp);
     const slPrice = toWatchNumber(setup.sl_price);
 
-    if (firstTp === null || slPrice === null) {
+    if (
+      entry2 === null ||
+      firstTp === null ||
+      secondTp === null ||
+      slPrice === null
+    ) {
       return res.status(400).json({
         ok: false,
-        error: "1차 TP와 SL 손절가가 필요합니다.",
+        error: "2차 진입가와 1·2차 TP, SL 손절가가 필요합니다.",
       });
     }
 
@@ -1896,10 +1866,13 @@ app.post("/api/trade-watch/start", async (req, res) => {
           symbol: setup.symbol || "XAUUSD",
           direction: setup.direction || "LONG",
           entry2,
-          entry3,
+
+          // 기존 DB 컬럼 호환용 값
+          entry3: entry2,
+
           first_tp: firstTp,
           second_tp: secondTp,
-          third_tp: thirdTp,
+          third_tp: secondTp,
           sl_price: slPrice,
           active_tp: firstTp,
           sent_entry2: false,
@@ -1994,21 +1967,11 @@ async function claimTradeWatchEvent(
 }
 
 function getConfirmedWatchStage(watch) {
-  if (watch?.sent_entry3) return 3;
   if (watch?.sent_entry2) return 2;
   return 1;
 }
 
-function getTpForWatchStage({
-  stage,
-  firstTp,
-  secondTp,
-  thirdTp,
-}) {
-  if (stage === 3) {
-    return thirdTp ?? secondTp ?? firstTp;
-  }
-
+function getTpForWatchStage({ stage, firstTp, secondTp }) {
   if (stage === 2) {
     return secondTp ?? firstTp;
   }
@@ -2017,9 +1980,8 @@ function getTpForWatchStage({
 }
 
 const AUTO_POSITION_LOTS = {
-  1: 1,
+  1: 2,
   2: 1,
-  3: 2,
 };
 
 const XAUUSD_VALUE_PER_LOT = 100;
@@ -2089,12 +2051,6 @@ function buildAutomaticPositionResults({
       roundText: "2차",
       entryPrice: setup?.entry2,
       lot: AUTO_POSITION_LOTS[2],
-    },
-    {
-      round: 3,
-      roundText: "3차",
-      entryPrice: setup?.entry3,
-      lot: AUTO_POSITION_LOTS[3],
     },
   ];
 
@@ -2442,23 +2398,15 @@ async function checkTradeWatchOnce(options = {}) {
     const direction = watch.direction || "LONG";
 
     const entry2 = toWatchNumber(watch.entry2);
-    const entry3 = toWatchNumber(watch.entry3);
     const firstTp = toWatchNumber(watch.first_tp);
     const secondTp = toWatchNumber(watch.second_tp);
-    const thirdTp = toWatchNumber(watch.third_tp);
     const slPrice = toWatchNumber(watch.sl_price);
 
     /*
       중요 처리 순서
       1. SL은 어떤 회차에서도 최우선으로 1회만 처리
       2. 1차 상태에서는 2차 진입만 처리하고 즉시 종료
-      3. 2차 확인 상태에서만 3차 진입 처리
-      4. TP는 DB에 확정된 마지막 진입 회차의 TP만 사용
-
-      따라서:
-      - 2차까지만 확정되면 2차 TP만 사용
-      - 3차 진입이 DB에 확정된 뒤에만 3차 TP 사용
-      - 한 번의 가격 틱에서 2차와 3차 메시지를 동시에 보내지 않음
+      3. TP는 DB에 확정된 마지막 진입 회차의 TP만 사용
     */
 
     if (
@@ -2550,61 +2498,11 @@ async function checkTradeWatchOnce(options = {}) {
       return;
     }
 
-    // 2차 진입이 DB에 확정된 상태에서만 3차 진입을 처리합니다.
-    if (
-      stage === 2 &&
-      hasTouchedEntry(direction, price, entry3)
-    ) {
-      const nextTp = thirdTp ?? secondTp ?? firstTp;
-
-      const claimedEntry3 = await claimTradeWatchEvent(db, {
-        flagColumn: "sent_entry3",
-        updates: {
-          active_tp: nextTp,
-          last_price: price,
-          last_checked_at: new Date().toISOString(),
-        },
-        requiredValues: {
-          sent_entry2: true,
-          sent_tp: false,
-          sent_sl: false,
-        },
-      });
-
-      if (!claimedEntry3) return;
-
-      if (isResultOnlyTime()) {
-        console.log(
-          "새벽 1시~오전 8시 결과 전용 시간: 3차 진입 단계만 기록하고 메시지는 생략합니다."
-        );
-        return;
-      }
-
-      try {
-        await sendWatchTelegramMessage(
-          makeEntryReachMessage({
-            direction,
-            round: 3,
-            entry: entry3,
-            tp: nextTp,
-            sl: slPrice,
-          })
-        );
-      } catch (error) {
-        // 중복 방지를 위해 이미 선점한 플래그는 되돌리지 않습니다.
-        console.error("3차 진입 메시지 발송 실패:", error.message);
-        throw error;
-      }
-
-      return;
-    }
-
     // TP는 active_tp 값을 맹신하지 않고, DB에 확정된 진입 회차로 다시 계산합니다.
     const confirmedTp = getTpForWatchStage({
       stage,
       firstTp,
       secondTp,
-      thirdTp,
     });
 
     if (
@@ -2613,13 +2511,7 @@ async function checkTradeWatchOnce(options = {}) {
       hasTouchedTp(direction, price, confirmedTp)
     ) {
       const stageRequirements =
-        stage === 3
-          ? {
-              sent_entry2: true,
-              sent_entry3: true,
-              sent_sl: false,
-            }
-          : stage === 2
+        stage === 2
           ? {
               sent_entry2: true,
               sent_entry3: false,
