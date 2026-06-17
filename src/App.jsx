@@ -26,7 +26,7 @@ const orderNames = [
 ];
 
 function getTodayText() {
-  // 매매 기록 날짜만 한국시간 오전 8시에 변경합니다.
+  // 매매 기록 날짜만 한국시간 오전 7시에 변경합니다.
   // 운영시간·잠금시간·메시지 발송시간에는 영향을 주지 않습니다.
   const now = new Date(
     new Date().toLocaleString("en-US", {
@@ -34,7 +34,7 @@ function getTodayText() {
     })
   );
 
-  if (now.getHours() < 8) {
+  if (now.getHours() < 7) {
     now.setDate(now.getDate() - 1);
   }
 
@@ -1690,7 +1690,7 @@ const calcText = useMemo(() => {
               />
             </div>
 
-            <div className="calc-result-grid two">
+            <div className="calc-result-grid">
               <div className="calc-box">
                 <p>1차 TP</p>
                 <strong>{formatNumber(calc.firstTp)}</strong>

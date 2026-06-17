@@ -78,12 +78,12 @@ function getCalendarDate() {
   return toDateText(getKstNow());
 }
 
-// 매매 기록 날짜만 오전 8시에 변경합니다.
+// 매매 기록 날짜만 오전 7시에 변경합니다.
 // 운영시간·잠금시간·텔레그램 발송시간에는 영향을 주지 않습니다.
 function getTodayLogDate() {
   const now = getKstNow();
 
-  if (now.getHours() < 8) {
+  if (now.getHours() < 7) {
     now.setDate(now.getDate() - 1);
   }
 
@@ -95,13 +95,13 @@ function getSignalLockDate() {
   return getCalendarDate();
 }
 
-// 새벽 1시~오전 8시는 진행 중 포지션의 결과(TP/SL)만 전송합니다.
+// 새벽 1시~오전 7시는 진행 중 포지션의 결과(TP/SL)만 전송합니다.
 // 진입 단계는 내부 기록만 갱신하고 2차 진입 메시지는 보내지 않습니다.
 function isResultOnlyTime() {
   const now = getKstNow();
   const minutes = now.getHours() * 60 + now.getMinutes();
 
-  return minutes >= 1 * 60 && minutes < 8 * 60;
+  return minutes >= 1 * 60 && minutes < 7 * 60;
 }
 
 function getWeekKey(dateText) {
@@ -122,15 +122,15 @@ function getAutoScheduleState() {
   const minutes = hour * 60 + minute;
 
   // 신규 신호 수신 시간(KST)
-  // 08:00 ~ 22:00 수신 가능
-  // 22:00 ~ 23:00 중간 자동 잠금
+  // 07:00 ~ 09:00 수신 가능
+  // 09:00 ~ 23:00 자동 잠금
   // 23:00 ~ 01:00 수신 가능
-  // 01:00 ~ 08:00 자동 잠금
+  // 01:00 ~ 07:00 자동 잠금
   // 이미 진행 중인 포지션의 진입가/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
-  const openStart1 = 8 * 60;
-  const openEnd1 = 22 * 60;
+  const openStart1 = 7 * 60;
+  const openEnd1 = 9 * 60;
 
-  const lockStart = 22 * 60;
+  const lockStart = 9 * 60;
   const lockEnd = 23 * 60;
 
   const openStart2 = 23 * 60;
@@ -2474,7 +2474,7 @@ async function checkTradeWatchOnce(options = {}) {
 
       if (isResultOnlyTime()) {
         console.log(
-          "새벽 1시~오전 8시 결과 전용 시간: 2차 진입 단계만 기록하고 메시지는 생략합니다."
+          "새벽 1시~오전 7시 결과 전용 시간: 2차 진입 단계만 기록하고 메시지는 생략합니다."
         );
         return;
       }
