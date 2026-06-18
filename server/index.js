@@ -58,7 +58,16 @@ const DAILY_CLOSE_NOTICE_TEXT = `&lt; 운영시간 안내 &gt;
 금일 매매 여기까진 진행하도록 하겠습니다.
 
 늦은시간까지 고생하셨습니다.`;
-const dailyCloseNoticeMemory = new Set();
+
+const TELEGRAM_EVENT_PROCESSING_TIMEOUT_MS = 2 * 60 * 1000;
+const TELEGRAM_EVENT_RETRY_TYPES = [
+  "ENTRY2",
+  "TP",
+  "SL",
+  "MARKET_CLOSE",
+  "DAILY_CLOSE",
+];
+const telegramEventMemory = new Map();
 
 let sentSignals = [];
 let blockedSignals = [];
@@ -104,15 +113,6 @@ function getTodayLogDate() {
 // signal_locks는 실제 달력 날짜 기준으로 유지해 운영 잠금 로직을 바꾸지 않습니다.
 function getSignalLockDate() {
   return getCalendarDate();
-}
-
-// 새벽 1시~오전 7시는 진행 중 포지션의 결과(TP/SL)만 전송합니다.
-// 진입 단계는 내부 기록만 갱신하고 2차 진입 메시지는 보내지 않습니다.
-function isResultOnlyTime() {
-  const now = getKstNow();
-  const minutes = now.getHours() * 60 + now.getMinutes();
-
-  return minutes >= 1 * 60 && minutes < 7 * 60;
 }
 
 function getWeekKey(dateText) {
@@ -498,8 +498,31 @@ async function acquireTodaySignalLock(payload) {
 
   if (error) {
     // 23505 = unique constraint violation
-    // 오늘 날짜 lock_date가 이미 있으면 이미 다른 신호가 선점한 상태입니다.
+    // 같은 Telegram 메시지가 재시도된 경우에는 기존 잠금을 이어서 사용합니다.
     if (error.code === "23505") {
+      const { data: existingLock, error: readError } = await supabase
+        .from("signal_locks")
+        .select("*")
+        .eq("lock_date", today)
+        .maybeSingle();
+
+      if (readError) throw readError;
+
+      const isSameMessage =
+        existingLock &&
+        String(existingLock.source_chat_id) ===
+          String(payload.sourceChatId) &&
+        String(existingLock.source_message_id) ===
+          String(payload.sourceMessageId);
+
+      if (isSameMessage) {
+        return {
+          ok: true,
+          lock: existingLock,
+          resumed: true,
+        };
+      }
+
       return {
         ok: false,
         reason: "진행중 유입으로 미전송",
@@ -558,7 +581,26 @@ async function createSentSignalLog(payload) {
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    if (error.code === "23505") {
+      const { data: existingRow, error: readError } = await supabase
+        .from("signal_logs")
+        .select("*")
+        .eq("source_chat_id", payload.sourceChatId)
+        .eq("source_message_id", payload.sourceMessageId)
+        .eq("log_type", "sent")
+        .maybeSingle();
+
+      if (readError) throw readError;
+
+      if (existingRow) {
+        await syncSignalLogsFromDb();
+        return mapSentLog(existingRow);
+      }
+    }
+
+    throw error;
+  }
 
   const mapped = mapSentLog(data);
 
@@ -596,7 +638,26 @@ async function createBlockedSignalLog(payload) {
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    if (error.code === "23505") {
+      const { data: existingRow, error: readError } = await supabase
+        .from("signal_logs")
+        .select("*")
+        .eq("source_chat_id", payload.sourceChatId)
+        .eq("source_message_id", payload.messageId)
+        .eq("log_type", "blocked")
+        .maybeSingle();
+
+      if (readError) throw readError;
+
+      if (existingRow) {
+        await syncSignalLogsFromDb();
+        return mapBlockedLog(existingRow);
+      }
+    }
+
+    throw error;
+  }
 
   const mapped = mapBlockedLog(data);
 
@@ -784,38 +845,586 @@ async function telegramApi(method, body) {
     throw new Error("BOT_TOKEN이 Render 환경변수 또는 .env에 없습니다.");
   }
 
-  const response = await fetch(
-    `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    }
-  );
+  let response;
 
-  const data = await response.json();
+  try {
+    response = await fetch(
+      `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+  } catch (error) {
+    const networkError = new Error(
+      `Telegram 네트워크 오류: ${error.message}`
+    );
+
+    // 요청이 텔레그램에 도착했는지 알 수 없는 경우입니다.
+    // 자동 재전송하면 중복될 수 있으므로 needs_check로 분리합니다.
+    networkError.telegramDeliveryUnknown = true;
+    throw networkError;
+  }
+
+  let data;
+
+  try {
+    data = await response.json();
+  } catch (error) {
+    const parseError = new Error(
+      `Telegram 응답 확인 실패: ${error.message}`
+    );
+
+    parseError.telegramDeliveryUnknown = true;
+    throw parseError;
+  }
 
   if (!data.ok) {
     console.error("Telegram API Error:", data);
-    throw new Error(data.description || "Telegram API Error");
+
+    const apiError = new Error(
+      data.description || "Telegram API Error"
+    );
+
+    // 텔레그램이 실패 응답을 명확하게 반환한 경우는 재시도할 수 있습니다.
+    apiError.telegramDeliveryUnknown = false;
+    apiError.telegramResponse = data;
+    throw apiError;
   }
 
   return data.result;
 }
 
-async function sendCloseMarketMessage() {
+function isTelegramEventProcessingStale(event) {
+  if (!event?.locked_at) return true;
+
+  const lockedAt = new Date(event.locked_at).getTime();
+
+  if (!Number.isFinite(lockedAt)) return true;
+
+  return Date.now() - lockedAt > TELEGRAM_EVENT_PROCESSING_TIMEOUT_MS;
+}
+
+function makeTelegramEventResponse(event, result = null) {
+  return {
+    eventKey: event?.event_key || "",
+    status: event?.status || "",
+    event: event || null,
+    result:
+      result ||
+      event?.response_json ||
+      (event?.telegram_message_id
+        ? { message_id: event.telegram_message_id }
+        : null),
+  };
+}
+
+async function getTelegramEvent(eventKey) {
+  if (!supabase) {
+    return telegramEventMemory.get(eventKey) || null;
+  }
+
+  const { data, error } = await supabase
+    .from("telegram_events")
+    .select("*")
+    .eq("event_key", eventKey)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data || null;
+}
+
+async function ensureTelegramEvent({
+  eventKey,
+  tradeDate,
+  eventType,
+  signalLogId = null,
+  method,
+  body,
+}) {
+  if (!eventKey) {
+    throw new Error("텔레그램 이벤트 고유키가 없습니다.");
+  }
+
+  if (!supabase) {
+    const existing = telegramEventMemory.get(eventKey);
+
+    if (existing) return existing;
+
+    const created = {
+      event_key: eventKey,
+      trade_date: tradeDate || getTodayLogDate(),
+      event_type: eventType,
+      signal_log_id:
+        signalLogId === null || signalLogId === undefined
+          ? null
+          : String(signalLogId),
+      method,
+      chat_id: String(body?.chat_id ?? TARGET_CHAT_ID ?? ""),
+      request_body: body,
+      status: "pending",
+      attempt_count: 0,
+      telegram_message_id: null,
+      response_json: null,
+      last_error: null,
+      locked_at: null,
+      sent_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    telegramEventMemory.set(eventKey, created);
+    return created;
+  }
+
+  const payload = {
+    event_key: eventKey,
+    trade_date: tradeDate || getTodayLogDate(),
+    event_type: eventType,
+    signal_log_id:
+      signalLogId === null || signalLogId === undefined
+        ? null
+        : String(signalLogId),
+    method,
+    chat_id: String(body?.chat_id ?? TARGET_CHAT_ID ?? ""),
+    request_body: body,
+    status: "pending",
+  };
+
+  const { data, error } = await supabase
+    .from("telegram_events")
+    .insert(payload)
+    .select("*")
+    .single();
+
+  if (!error) {
+    return data;
+  }
+
+  if (error.code !== "23505") {
+    throw error;
+  }
+
+  const existing = await getTelegramEvent(eventKey);
+
+  if (!existing) {
+    throw new Error(
+      `텔레그램 이벤트 중복 확인 후 기록을 찾지 못했습니다: ${eventKey}`
+    );
+  }
+
+  return existing;
+}
+
+async function resetStaleTelegramEvent(event) {
+  if (!event || event.status !== "processing") return event;
+  if (!isTelegramEventProcessingStale(event)) return event;
+
+  if (!supabase) {
+    const reset = {
+      ...event,
+      status: "needs_check",
+      last_error:
+        "이전 전송 처리가 중단되어 실제 전송 여부 확인 필요",
+      locked_at: null,
+      updated_at: new Date().toISOString(),
+    };
+
+    telegramEventMemory.set(event.event_key, reset);
+    return reset;
+  }
+
+  const { data, error } = await supabase
+    .from("telegram_events")
+    .update({
+      status: "needs_check",
+      last_error:
+        "이전 전송 처리가 중단되어 실제 전송 여부 확인 필요",
+      locked_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("event_key", event.event_key)
+    .eq("status", "processing")
+    .select("*")
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data || (await getTelegramEvent(event.event_key));
+}
+
+async function claimTelegramEvent(event) {
+  const normalized = await resetStaleTelegramEvent(event);
+
+  if (!normalized) return null;
+  if (!["pending", "failed"].includes(normalized.status)) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const nextAttempt = Number(normalized.attempt_count || 0) + 1;
+
+  if (!supabase) {
+    const claimed = {
+      ...normalized,
+      status: "processing",
+      attempt_count: nextAttempt,
+      locked_at: now,
+      last_error: null,
+      updated_at: now,
+    };
+
+    telegramEventMemory.set(normalized.event_key, claimed);
+    return claimed;
+  }
+
+  const { data, error } = await supabase
+    .from("telegram_events")
+    .update({
+      status: "processing",
+      attempt_count: nextAttempt,
+      locked_at: now,
+      last_error: null,
+      updated_at: now,
+    })
+    .eq("event_key", normalized.event_key)
+    .eq("status", normalized.status)
+    .select("*")
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data || null;
+}
+
+async function markTelegramEventSent(event, result) {
+  const now = new Date().toISOString();
+  const telegramMessageId =
+    result?.message_id === undefined || result?.message_id === null
+      ? null
+      : result.message_id;
+
+  if (!supabase) {
+    const sent = {
+      ...event,
+      status: "sent",
+      telegram_message_id: telegramMessageId,
+      response_json: result || null,
+      last_error: null,
+      locked_at: null,
+      sent_at: now,
+      updated_at: now,
+    };
+
+    telegramEventMemory.set(event.event_key, sent);
+    return sent;
+  }
+
+  const { data, error } = await supabase
+    .from("telegram_events")
+    .update({
+      status: "sent",
+      telegram_message_id: telegramMessageId,
+      response_json: result || null,
+      last_error: null,
+      locked_at: null,
+      sent_at: now,
+      updated_at: now,
+    })
+    .eq("event_key", event.event_key)
+    .eq("status", "processing")
+    .select("*")
+    .single();
+
+  if (error) throw error;
+
+  return data;
+}
+
+async function markTelegramEventFailure(event, error) {
+  const deliveryUnknown = Boolean(error?.telegramDeliveryUnknown);
+  const status = deliveryUnknown ? "needs_check" : "failed";
+  const now = new Date().toISOString();
+
+  if (!supabase) {
+    const failed = {
+      ...event,
+      status,
+      last_error: error?.message || "텔레그램 전송 실패",
+      locked_at: null,
+      updated_at: now,
+    };
+
+    telegramEventMemory.set(event.event_key, failed);
+    return failed;
+  }
+
+  const { data, error: updateError } = await supabase
+    .from("telegram_events")
+    .update({
+      status,
+      last_error: error?.message || "텔레그램 전송 실패",
+      locked_at: null,
+      updated_at: now,
+    })
+    .eq("event_key", event.event_key)
+    .eq("status", "processing")
+    .select("*")
+    .maybeSingle();
+
+  if (updateError) throw updateError;
+
+  return data || (await getTelegramEvent(event.event_key));
+}
+
+async function dispatchTelegramEvent(event) {
+  if (!event) {
+    return {
+      eventKey: "",
+      status: "missing",
+      event: null,
+      result: null,
+    };
+  }
+
+  if (event.status === "sent") {
+    return makeTelegramEventResponse(event);
+  }
+
+  if (event.status === "needs_check") {
+    return makeTelegramEventResponse(event);
+  }
+
+  if (
+    event.status === "processing" &&
+    !isTelegramEventProcessingStale(event)
+  ) {
+    return makeTelegramEventResponse(event);
+  }
+
+  const claimed = await claimTelegramEvent(event);
+
+  if (!claimed) {
+    const latest = await getTelegramEvent(event.event_key);
+    return makeTelegramEventResponse(latest || event);
+  }
+
+  let result;
+
+  try {
+    result = await telegramApi(
+      claimed.method,
+      claimed.request_body
+    );
+  } catch (error) {
+    const failed = await markTelegramEventFailure(claimed, error);
+
+    error.telegramEventKey = claimed.event_key;
+    error.telegramEventStatus = failed?.status || "failed";
+    error.telegramEventNeedsCheck =
+      failed?.status === "needs_check";
+    error.telegramEventKeepLock =
+      failed?.status === "needs_check";
+
+    throw error;
+  }
+
+  try {
+    const sent = await markTelegramEventSent(claimed, result);
+    return makeTelegramEventResponse(sent, result);
+  } catch (error) {
+    // Telegram 전송 성공 뒤 DB 완료 저장만 실패한 경우입니다.
+    // 자동 재전송하면 중복될 수 있으므로 needs_check로 남깁니다.
+    const stateError = new Error(
+      `Telegram 전송 후 이벤트 완료 저장 실패: ${error.message}`
+    );
+
+    stateError.telegramDeliveryUnknown = true;
+
+    let failed = null;
+
+    try {
+      failed = await markTelegramEventFailure(
+        claimed,
+        stateError
+      );
+    } catch (markError) {
+      console.error(
+        `Telegram 이벤트 확인 필요 상태 저장 실패 (${claimed.event_key}):`,
+        markError.message
+      );
+    }
+
+    stateError.telegramEventKey = claimed.event_key;
+    stateError.telegramEventStatus =
+      failed?.status || "needs_check";
+    stateError.telegramEventNeedsCheck = true;
+    stateError.telegramEventKeepLock = true;
+
+    throw stateError;
+  }
+}
+
+async function sendTelegramEvent({
+  eventKey,
+  tradeDate,
+  eventType,
+  signalLogId = null,
+  method = "sendMessage",
+  body,
+  requireSent = true,
+}) {
+  const event = await ensureTelegramEvent({
+    eventKey,
+    tradeDate,
+    eventType,
+    signalLogId,
+    method,
+    body,
+  });
+
+  let result;
+
+  try {
+    result = await dispatchTelegramEvent(event);
+  } catch (error) {
+    if (requireSent) throw error;
+
+    return {
+      eventKey,
+      status: error.telegramEventStatus || "failed",
+      event: await getTelegramEvent(eventKey),
+      result: null,
+      error,
+    };
+  }
+
+  if (requireSent && result.status !== "sent") {
+    const waitError = new Error(
+      result.status === "needs_check"
+        ? `텔레그램 전송 여부 확인이 필요합니다: ${eventKey}`
+        : `텔레그램 이벤트가 아직 전송 중입니다: ${eventKey}`
+    );
+
+    waitError.telegramEventKey = eventKey;
+    waitError.telegramEventStatus = result.status;
+    waitError.telegramEventNeedsCheck =
+      result.status === "needs_check";
+    waitError.telegramEventKeepLock = true;
+    throw waitError;
+  }
+
+  return result;
+}
+
+async function linkTelegramEventToSignal(eventKey, signalLogId) {
+  if (!eventKey || signalLogId === null || signalLogId === undefined) {
+    return;
+  }
+
+  if (!supabase) {
+    const event = telegramEventMemory.get(eventKey);
+
+    if (event) {
+      telegramEventMemory.set(eventKey, {
+        ...event,
+        signal_log_id: String(signalLogId),
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    return;
+  }
+
+  const { error } = await supabase
+    .from("telegram_events")
+    .update({
+      signal_log_id: String(signalLogId),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("event_key", eventKey);
+
+  if (error) throw error;
+}
+
+async function retryFailedTelegramEvents() {
+  if (!supabase) return;
+
+  const { data, error } = await supabase
+    .from("telegram_events")
+    .select("*")
+    .in("event_type", TELEGRAM_EVENT_RETRY_TYPES)
+    .in("status", ["pending", "failed", "processing"])
+    .order("created_at", { ascending: true })
+    .limit(20);
+
+  if (error) throw error;
+
+  for (const event of data || []) {
+    try {
+      await dispatchTelegramEvent(event);
+    } catch (sendError) {
+      console.error(
+        `텔레그램 이벤트 재시도 실패 (${event.event_key}):`,
+        sendError.message
+      );
+    }
+  }
+}
+
+
+async function hasUnresolvedPositionTelegramEvents(tradeDate) {
+  const protectedTypes = ["NEW_SIGNAL", "ENTRY2", "TP", "SL", "MARKET_CLOSE"];
+
+  if (!supabase) {
+    return Array.from(telegramEventMemory.values()).some(
+      (event) =>
+        String(event.trade_date) === String(tradeDate) &&
+        protectedTypes.includes(event.event_type) &&
+        event.status !== "sent"
+    );
+  }
+
+  const { data, error } = await supabase
+    .from("telegram_events")
+    .select("event_key")
+    .eq("trade_date", tradeDate)
+    .in("event_type", protectedTypes)
+    .neq("status", "sent")
+    .limit(1);
+
+  if (error) throw error;
+
+  return Array.isArray(data) && data.length > 0;
+}
+
+async function sendCloseMarketMessage({
+  eventKey,
+  tradeDate,
+  signalLogId,
+}) {
   if (!TARGET_CHAT_ID) {
     throw new Error("TARGET_CHAT_ID가 없습니다.");
   }
 
-  return telegramApi("sendMessage", {
-    chat_id: TARGET_CHAT_ID,
-    text: `✅✅ 시장가 매도 진행 ✅✅
+  return sendTelegramEvent({
+    eventKey,
+    tradeDate,
+    eventType: "MARKET_CLOSE",
+    signalLogId,
+    method: "sendMessage",
+    body: {
+      chat_id: TARGET_CHAT_ID,
+      text: `✅✅ 시장가 매도 진행 ✅✅
 ✅✅ 시장가 매도 진행 ✅✅
 
 모든 회차 정리 진행하겠습니다`,
+    },
+    requireSent: false,
   });
 }
 
@@ -850,71 +1459,20 @@ function isDailyCloseNoticeTime() {
   return minutes >= 1 * 60 && minutes < 7 * 60;
 }
 
-async function claimDailyCloseNotice(tradeDate) {
-  if (!supabase) {
-    if (dailyCloseNoticeMemory.has(tradeDate)) {
-      return false;
-    }
-
-    dailyCloseNoticeMemory.add(tradeDate);
-    return { tradeDate };
-  }
-
-  const { data, error } = await supabase
-    .from("position_records")
-    .insert({
-      record_date: tradeDate,
-      symbol: DAILY_CLOSE_NOTICE_MARKER_SYMBOL,
-      week_key: getWeekKey(tradeDate),
-      content: "pending",
-    })
-    .select("id")
-    .single();
-
-  if (error) {
-    // record_date + symbol 고유값이 이미 있으면 오늘 마감 안내가 선점된 상태입니다.
-    if (error.code === "23505") {
-      return false;
-    }
-
-    throw error;
-  }
-
-  return data;
-}
-
-async function releaseDailyCloseNoticeClaim(tradeDate) {
-  if (!supabase) {
-    dailyCloseNoticeMemory.delete(tradeDate);
-    return;
-  }
-
-  const { error } = await supabase
-    .from("position_records")
-    .delete()
-    .eq("record_date", tradeDate)
-    .eq("symbol", DAILY_CLOSE_NOTICE_MARKER_SYMBOL)
-    .eq("content", "pending");
-
-  if (error) throw error;
-}
-
-async function completeDailyCloseNoticeClaim(tradeDate) {
-  if (!supabase) return;
-
-  const { error } = await supabase
-    .from("position_records")
-    .update({ content: "sent" })
-    .eq("record_date", tradeDate)
-    .eq("symbol", DAILY_CLOSE_NOTICE_MARKER_SYMBOL)
-    .eq("content", "pending");
-
-  if (error) throw error;
-}
-
-async function checkDailyCloseNoticeOnce() {
+async function checkDailyCloseNoticeOnce(options = {}) {
   if (dailyCloseNoticeCheckInProgress) return false;
-  if (!isDailyCloseNoticeTime()) return false;
+
+  const requestedTradeDate = String(
+    options.tradeDate || ""
+  ).trim();
+
+  const isPreviousTradeDate =
+    requestedTradeDate &&
+    requestedTradeDate < getTodayLogDate();
+
+  if (!isDailyCloseNoticeTime() && !isPreviousTradeDate) {
+    return false;
+  }
 
   dailyCloseNoticeCheckInProgress = true;
 
@@ -926,53 +1484,59 @@ async function checkDailyCloseNoticeOnce() {
       return false;
     }
 
-    const tradeDate = getTodayLogDate();
-    const claim = await claimDailyCloseNotice(tradeDate);
+    // 오전 7시 이전에는 전날 매매일을 사용합니다.
+    // 포지션이 오전 7시 이후 끝난 경우에는 해당 포지션의 기존 매매일을 유지합니다.
+    const tradeDate =
+      requestedTradeDate || getTodayLogDate();
 
-    if (!claim) {
+    // 2차 진입·TP·SL·시장가 종료 메시지가 전송 완료되기 전에는
+    // 마감 안내를 먼저 보내지 않습니다.
+    if (await hasUnresolvedPositionTelegramEvents(tradeDate)) {
       return false;
     }
 
-    try {
-      await telegramApi("sendMessage", {
+    const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
+
+    const sendResult = await sendTelegramEvent({
+      eventKey,
+      tradeDate,
+      eventType: "DAILY_CLOSE",
+      method: "sendMessage",
+      body: {
         chat_id: TARGET_CHAT_ID,
         text: DAILY_CLOSE_NOTICE_TEXT,
         parse_mode: "HTML",
-      });
-    } catch (error) {
-      // 실제 텔레그램 전송 실패일 때만 선점을 풀어 다음 확인에서 재시도합니다.
-      try {
-        await releaseDailyCloseNoticeClaim(tradeDate);
-      } catch (releaseError) {
-        console.error(
-          "마감 안내 선점 해제 실패:",
-          releaseError.message
-        );
-      }
+      },
+      requireSent: false,
+    });
 
-      throw error;
+    if (sendResult.status === "sent") {
+      console.log(`금일 마감 안내 전송 완료: ${tradeDate}`);
+      return true;
     }
 
-    // 메시지는 이미 전송됐으므로 DB 완료 표시가 실패해도 pending 선점은 유지해 중복을 막습니다.
-    try {
-      await completeDailyCloseNoticeClaim(tradeDate);
-    } catch (completeError) {
+    if (sendResult.status === "needs_check") {
       console.error(
-        "마감 안내 완료 상태 저장 실패(중복 방지 선점은 유지):",
-        completeError.message
+        `금일 마감 안내 전송 여부 확인 필요: ${tradeDate}`
       );
+      return false;
     }
 
-    console.log(`금일 마감 안내 전송 완료: ${tradeDate}`);
-    return true;
+    console.error(
+      `금일 마감 안내 전송 대기/실패: ${tradeDate} (${sendResult.status})`
+    );
+
+    return false;
   } finally {
     dailyCloseNoticeCheckInProgress = false;
   }
 }
 
-async function tryDailyCloseNoticeAfterPositionFinish() {
+async function tryDailyCloseNoticeAfterPositionFinish(
+  tradeDate = ""
+) {
   try {
-    await checkDailyCloseNoticeOnce();
+    await checkDailyCloseNoticeOnce({ tradeDate });
   } catch (error) {
     // 마감 안내 실패가 포지션 종료 자체를 실패시키지는 않도록 분리합니다.
     console.error("금일 마감 안내 자동 전송 실패:", error.message);
@@ -1195,8 +1759,29 @@ async function handleSignalMessage(message) {
     const order = maxOrder + 1;
     const startedAt = getTimeText();
     const direction = getSignalDirection(message);
+    const signalEventKey =
+      `SOURCE:${sourceChatId}:${message.message_id}:NEW_SIGNAL`;
 
-    const forwarded = await forwardMessageToTarget(message);
+    const forwardedEvent = await sendTelegramEvent({
+      eventKey: signalEventKey,
+      tradeDate: getTodayLogDate(),
+      eventType: "NEW_SIGNAL",
+      method: "forwardMessage",
+      body: {
+        chat_id: TARGET_CHAT_ID,
+        from_chat_id: message.chat.id,
+        message_id: message.message_id,
+      },
+      requireSent: true,
+    });
+
+    const forwarded = forwardedEvent.result;
+
+    if (!forwarded?.message_id) {
+      throw new Error(
+        "최초 신호 전달 결과에서 Telegram message_id를 찾지 못했습니다."
+      );
+    }
 
     const newSignal = {
       id: order,
@@ -1214,6 +1799,11 @@ async function handleSignalMessage(message) {
     };
 
     const savedSignal = await createSentSignalLog(newSignal);
+
+    await linkTelegramEventToSignal(
+      signalEventKey,
+      savedSignal.id
+    );
 
     await attachSignalLogToLock(savedSignal.id);
 
@@ -1244,7 +1834,17 @@ async function handleSignalMessage(message) {
       );
     }
   } catch (error) {
-    await releaseTodaySignalLock();
+    // 전송 여부가 불확실하거나 다른 요청이 처리 중이면 잠금을 유지해
+    // 같은 신호가 중복 전달되거나 다음 포지션이 겹치지 않도록 합니다.
+    if (!error.telegramEventKeepLock) {
+      await releaseTodaySignalLock();
+    } else {
+      console.error(
+        "최초 신호 전송 확인 필요 - 포지션 잠금을 유지합니다:",
+        error.message
+      );
+    }
+
     throw error;
   } finally {
     signalForwardInProgress = false;
@@ -2122,6 +2722,44 @@ async function claimTradeWatchEvent(
   return data || null;
 }
 
+function getTradeWatchEventPrefix(watch) {
+  const stableWatchId =
+    activeSignal?.id ||
+    watch?.signal_log_id ||
+    watch?.started_at ||
+    watch?.id ||
+    watch?.watch_key ||
+    "current";
+
+  return `POSITION:${stableWatchId}`;
+}
+
+function getTradeDateForWatch(watch) {
+  if (activeSignal?.logDate) {
+    return activeSignal.logDate;
+  }
+
+  if (watch?.started_at) {
+    const startedAt = new Date(watch.started_at);
+
+    if (Number.isFinite(startedAt.getTime())) {
+      const kstStartedAt = new Date(
+        startedAt.toLocaleString("en-US", {
+          timeZone: "Asia/Seoul",
+        })
+      );
+
+      if (kstStartedAt.getHours() < 7) {
+        kstStartedAt.setDate(kstStartedAt.getDate() - 1);
+      }
+
+      return toDateText(kstStartedAt);
+    }
+  }
+
+  return getTodayLogDate();
+}
+
 function getConfirmedWatchStage(watch) {
   if (watch?.sent_entry2) return 2;
   return 1;
@@ -2513,7 +3151,11 @@ async function finishPositionAfterAutomaticExit(
     );
   }
 
-  await tryDailyCloseNoticeAfterPositionFinish();
+  await tryDailyCloseNoticeAfterPositionFinish(
+    automaticResult?.recordDate ||
+      finishedSignal?.logDate ||
+      ""
+  );
 
   return finishedSignal;
 }
@@ -2527,6 +3169,10 @@ async function checkTradeWatchOnce(options = {}) {
 
   try {
     const db = requireSupabase();
+
+    if (!activeSignal) {
+      await syncSignalLogsFromDb();
+    }
 
     const { data: watch, error } = await db
       .from("trade_watch_state")
@@ -2572,6 +3218,28 @@ async function checkTradeWatchOnce(options = {}) {
       !watch.sent_tp &&
       hasTouchedSl(direction, price, slPrice)
     ) {
+      const slEventKey =
+        `${getTradeWatchEventPrefix(watch)}:SL`;
+
+      const slSendResult = await sendTelegramEvent({
+        eventKey: slEventKey,
+        tradeDate: getTradeDateForWatch(watch),
+        eventType: "SL",
+        signalLogId: activeSignal?.id || null,
+        method: "sendMessage",
+        body: {
+          chat_id: TARGET_CHAT_ID,
+          text: makeSlReachMessage(),
+        },
+        requireSent: false,
+      });
+
+      if (slSendResult.status === "needs_check") {
+        console.error(
+          `SL 메시지 전송 여부 확인 필요: ${slEventKey}`
+        );
+      }
+
       const claimedSl = await claimTradeWatchEvent(db, {
         flagColumn: "sent_sl",
         updates: {
@@ -2587,21 +3255,11 @@ async function checkTradeWatchOnce(options = {}) {
 
       if (!claimedSl) return;
 
-      let sendError = null;
-
-      try {
-        await sendWatchTelegramMessage(makeSlReachMessage());
-      } catch (error) {
-        sendError = error;
-        console.error("SL 메시지 발송 실패:", error.message);
-      }
-
       await finishPositionAfterAutomaticExit("SL", {
         watch: claimedSl,
         exitPrice: slPrice,
       });
 
-      if (sendError) throw sendError;
       return;
     }
 
@@ -2613,6 +3271,34 @@ async function checkTradeWatchOnce(options = {}) {
       hasTouchedEntry(direction, price, entry2)
     ) {
       const nextTp = secondTp ?? firstTp;
+
+      const entry2EventKey =
+        `${getTradeWatchEventPrefix(watch)}:ENTRY2`;
+
+      const entry2SendResult = await sendTelegramEvent({
+        eventKey: entry2EventKey,
+        tradeDate: getTradeDateForWatch(watch),
+        eventType: "ENTRY2",
+        signalLogId: activeSignal?.id || null,
+        method: "sendMessage",
+        body: {
+          chat_id: TARGET_CHAT_ID,
+          text: makeEntryReachMessage({
+            direction,
+            round: 2,
+            entry: entry2,
+            tp: nextTp,
+            sl: slPrice,
+          }),
+        },
+        requireSent: false,
+      });
+
+      if (entry2SendResult.status === "needs_check") {
+        console.error(
+          `2차 진입 메시지 전송 여부 확인 필요: ${entry2EventKey}`
+        );
+      }
 
       const claimedEntry2 = await claimTradeWatchEvent(db, {
         flagColumn: "sent_entry2",
@@ -2629,29 +3315,6 @@ async function checkTradeWatchOnce(options = {}) {
       });
 
       if (!claimedEntry2) return;
-
-      if (isResultOnlyTime()) {
-        console.log(
-          "새벽 1시~오전 7시 결과 전용 시간: 2차 진입 단계만 기록하고 메시지는 생략합니다."
-        );
-        return;
-      }
-
-      try {
-        await sendWatchTelegramMessage(
-          makeEntryReachMessage({
-            direction,
-            round: 2,
-            entry: entry2,
-            tp: nextTp,
-            sl: slPrice,
-          })
-        );
-      } catch (error) {
-        // 중복 방지를 위해 이미 선점한 플래그는 되돌리지 않습니다.
-        console.error("2차 진입 메시지 발송 실패:", error.message);
-        throw error;
-      }
 
       return;
     }
@@ -2681,6 +3344,28 @@ async function checkTradeWatchOnce(options = {}) {
               sent_sl: false,
             };
 
+      const tpEventKey =
+        `${getTradeWatchEventPrefix(watch)}:TP`;
+
+      const tpSendResult = await sendTelegramEvent({
+        eventKey: tpEventKey,
+        tradeDate: getTradeDateForWatch(watch),
+        eventType: "TP",
+        signalLogId: activeSignal?.id || null,
+        method: "sendMessage",
+        body: {
+          chat_id: TARGET_CHAT_ID,
+          text: makeTpReachMessage(),
+        },
+        requireSent: false,
+      });
+
+      if (tpSendResult.status === "needs_check") {
+        console.error(
+          `TP 메시지 전송 여부 확인 필요: ${tpEventKey}`
+        );
+      }
+
       const claimedTp = await claimTradeWatchEvent(db, {
         flagColumn: "sent_tp",
         updates: {
@@ -2695,21 +3380,11 @@ async function checkTradeWatchOnce(options = {}) {
 
       if (!claimedTp) return;
 
-      let sendError = null;
-
-      try {
-        await sendWatchTelegramMessage(makeTpReachMessage());
-      } catch (error) {
-        sendError = error;
-        console.error("TP 메시지 발송 실패:", error.message);
-      }
-
       await finishPositionAfterAutomaticExit("TP", {
         watch: claimedTp,
         exitPrice: confirmedTp,
       });
 
-      if (sendError) throw sendError;
       return;
     }
   } catch (error) {
@@ -2730,6 +3405,39 @@ async function checkTradeWatchOnce(options = {}) {
     tradeWatchCheckInProgress = false;
   }
 }
+
+app.get("/api/telegram-events", async (req, res) => {
+  try {
+    const db = requireSupabase();
+    const requestedStatus = String(req.query.status || "").trim();
+
+    let query = db
+      .from("telegram_events")
+      .select(
+        "event_key, trade_date, event_type, signal_log_id, status, attempt_count, telegram_message_id, last_error, locked_at, sent_at, created_at, updated_at"
+      )
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+    if (requestedStatus) {
+      query = query.eq("status", requestedStatus);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    res.json({
+      ok: true,
+      events: data || [],
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
 
 app.get("/api/status", async (req, res) => {
   try {
@@ -2768,6 +3476,8 @@ app.post("/api/manual-on", async (req, res) => {
   try {
     await syncSignalLogsFromDb();
 
+    const manualOnTradeDate = activeSignal?.logDate || "";
+
     if (activeSignal) {
       await finishActiveSignalLog();
     } else {
@@ -2779,7 +3489,9 @@ app.post("/api/manual-on", async (req, res) => {
     activeSignal = null;
 
     await syncSignalLogsFromDb();
-    await tryDailyCloseNoticeAfterPositionFinish();
+    await tryDailyCloseNoticeAfterPositionFinish(
+      manualOnTradeDate
+    );
 
     res.json({
       ok: true,
@@ -2827,6 +3539,8 @@ app.post("/api/finish-signal", async (req, res) => {
     await syncSignalLogsFromDb();
 
     const closedSignalId = activeSignal?.id || null;
+    const closedTradeDate =
+      activeSignal?.logDate || getTodayLogDate();
     const marketExitAt = new Date().toISOString();
     const marketExitPrice = await getManualMarketExitPrice();
 
@@ -2854,7 +3568,11 @@ app.post("/api/finish-signal", async (req, res) => {
     }
 
     if (activeSignal && activeSignal.status === "진행중") {
-      await sendCloseMarketMessage();
+      await sendCloseMarketMessage({
+        eventKey: `POSITION:${closedSignalId}:MARKET_CLOSE`,
+        tradeDate: closedTradeDate,
+        signalLogId: closedSignalId,
+      });
     }
 
     let automaticResult = null;
@@ -2889,7 +3607,9 @@ app.post("/api/finish-signal", async (req, res) => {
     }
 
     await syncSignalLogsFromDb();
-    await tryDailyCloseNoticeAfterPositionFinish();
+    await tryDailyCloseNoticeAfterPositionFinish(
+      automaticResult?.recordDate || closedTradeDate
+    );
 
     res.json({
       ok: true,
@@ -3483,6 +4203,14 @@ setInterval(() => {
   checkTradeWatchOnce();
 }, PRICE_POLL_SECONDS * 1000);
 
+// 명확하게 실패한 텔레그램 이벤트만 자동 재시도합니다.
+// 전송 여부가 불확실한 needs_check 이벤트는 중복 방지를 위해 자동 재전송하지 않습니다.
+setInterval(() => {
+  retryFailedTelegramEvents().catch((error) => {
+    console.error("텔레그램 이벤트 재시도 확인 실패:", error.message);
+  });
+}, 15 * 1000);
+
 // 새벽 1시 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
 setInterval(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
@@ -3496,3 +4224,13 @@ setTimeout(() => {
     console.error("서버 시작 후 마감 안내 확인 실패:", error.message);
   });
 }, 3000);
+
+setTimeout(() => {
+  syncSignalLogsFromDb().catch((error) => {
+    console.error("서버 시작 후 진행중 포지션 복구 실패:", error.message);
+  });
+
+  retryFailedTelegramEvents().catch((error) => {
+    console.error("서버 시작 후 텔레그램 이벤트 복구 실패:", error.message);
+  });
+}, 1000);
