@@ -19,6 +19,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const SOURCE_CHAT_ID = process.env.SOURCE_CHAT_ID;
 const SOURCE_CHAT_ID_2 = process.env.SOURCE_CHAT_ID_2;
 const TARGET_CHAT_ID = process.env.TARGET_CHAT_ID;
+const TARGET_CHAT_ID_2 = process.env.TARGET_CHAT_ID_2 || "";
 const VANTAGE_TICK_TOKEN = process.env.VANTAGE_TICK_TOKEN || "";
 const PORT = process.env.PORT || 4000;
 
@@ -61,6 +62,7 @@ const DAILY_CLOSE_NOTICE_TEXT = `&lt; 운영시간 안내 &gt;
 
 const TELEGRAM_EVENT_PROCESSING_TIMEOUT_MS = 2 * 60 * 1000;
 const TELEGRAM_EVENT_RETRY_TYPES = [
+  "NEW_SIGNAL_COPY",
   "ENTRY2",
   "TP",
   "SL",
@@ -1321,6 +1323,159 @@ async function sendTelegramEvent({
   return result;
 }
 
+function getTargetChatIds() {
+  const targets = [TARGET_CHAT_ID, TARGET_CHAT_ID_2]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  // 같은 방 ID가 실수로 두 번 들어가도 한 번만 전송합니다.
+  return [...new Set(targets)];
+}
+
+function requireTargetChatIds() {
+  const targets = getTargetChatIds();
+
+  if (targets.length === 0) {
+    throw new Error(
+      "TARGET_CHAT_ID가 Render 환경변수 또는 .env에 없습니다."
+    );
+  }
+
+  return targets;
+}
+
+function makeTargetEventKey(baseEventKey, chatId, targetIndex) {
+  // 1번 전달방은 기존 이벤트 키를 그대로 유지해 기존 기록과 호환합니다.
+  // 2번 전달방부터만 방 ID를 붙여 별도의 이벤트로 관리합니다.
+  if (targetIndex === 0) return baseEventKey;
+
+  return `${baseEventKey}:TARGET:${chatId}`;
+}
+
+async function sendTelegramEventToTargets({
+  eventKey,
+  tradeDate,
+  eventType,
+  secondaryEventType = eventType,
+  signalLogId = null,
+  method = "sendMessage",
+  body,
+  requirePrimarySent = true,
+}) {
+  const targets = requireTargetChatIds();
+  const deliveries = [];
+
+  // 1번 전달방을 먼저 처리합니다. 2번 전달방 실패가 1번방 중복으로
+  // 이어지지 않도록 각 방을 서로 다른 이벤트로 순서대로 처리합니다.
+  for (let index = 0; index < targets.length; index += 1) {
+    const chatId = targets[index];
+    const targetEventKey = makeTargetEventKey(
+      eventKey,
+      chatId,
+      index
+    );
+
+    const delivery = await sendTelegramEvent({
+      eventKey: targetEventKey,
+      tradeDate,
+      eventType: index === 0 ? eventType : secondaryEventType,
+      signalLogId,
+      method,
+      body: {
+        ...body,
+        chat_id: chatId,
+      },
+      requireSent: index === 0 ? requirePrimarySent : false,
+    });
+
+    deliveries.push({
+      chatId,
+      eventKey: targetEventKey,
+      ...delivery,
+    });
+  }
+
+  return {
+    primary: deliveries[0] || null,
+    deliveries,
+    allSent:
+      deliveries.length > 0 &&
+      deliveries.every((delivery) => delivery.status === "sent"),
+    hasNeedsCheck: deliveries.some(
+      (delivery) => delivery.status === "needs_check"
+    ),
+  };
+}
+
+async function sendMessageToAllTargets(body) {
+  const targets = requireTargetChatIds();
+  const deliveries = [];
+
+  for (const chatId of targets) {
+    try {
+      const result = await telegramApi("sendMessage", {
+        ...body,
+        chat_id: chatId,
+      });
+
+      deliveries.push({ chatId, ok: true, result });
+    } catch (error) {
+      deliveries.push({
+        chatId,
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+
+  if (!deliveries.some((delivery) => delivery.ok)) {
+    throw new Error(
+      deliveries.map((delivery) => delivery.error).filter(Boolean).join(" / ") ||
+        "모든 전달방 메시지 전송에 실패했습니다."
+    );
+  }
+
+  return deliveries;
+}
+
+async function forwardMessageToAllTargets(message) {
+  const targets = requireTargetChatIds();
+  const deliveries = [];
+
+  for (const chatId of targets) {
+    try {
+      const result = await telegramApi("forwardMessage", {
+        chat_id: chatId,
+        from_chat_id: message.chat.id,
+        message_id: message.message_id,
+      });
+
+      deliveries.push({ chatId, ok: true, result });
+    } catch (error) {
+      deliveries.push({
+        chatId,
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+
+  if (!deliveries.some((delivery) => delivery.ok)) {
+    throw new Error(
+      deliveries.map((delivery) => delivery.error).filter(Boolean).join(" / ") ||
+        "모든 전달방 신호 전달에 실패했습니다."
+    );
+  }
+
+  return deliveries;
+}
+
+async function linkTelegramEventsToSignal(deliveries, signalLogId) {
+  for (const delivery of deliveries || []) {
+    await linkTelegramEventToSignal(delivery.eventKey, signalLogId);
+  }
+}
+
 async function linkTelegramEventToSignal(eventKey, signalLogId) {
   if (!eventKey || signalLogId === null || signalLogId === undefined) {
     return;
@@ -1378,7 +1533,14 @@ async function retryFailedTelegramEvents() {
 
 
 async function hasUnresolvedPositionTelegramEvents(tradeDate) {
-  const protectedTypes = ["NEW_SIGNAL", "ENTRY2", "TP", "SL", "MARKET_CLOSE"];
+  const protectedTypes = [
+    "NEW_SIGNAL",
+    "NEW_SIGNAL_COPY",
+    "ENTRY2",
+    "TP",
+    "SL",
+    "MARKET_CLOSE",
+  ];
 
   if (!supabase) {
     return Array.from(telegramEventMemory.values()).some(
@@ -1407,48 +1569,28 @@ async function sendCloseMarketMessage({
   tradeDate,
   signalLogId,
 }) {
-  if (!TARGET_CHAT_ID) {
-    throw new Error("TARGET_CHAT_ID가 없습니다.");
-  }
-
-  return sendTelegramEvent({
+  return sendTelegramEventToTargets({
     eventKey,
     tradeDate,
     eventType: "MARKET_CLOSE",
     signalLogId,
     method: "sendMessage",
     body: {
-      chat_id: TARGET_CHAT_ID,
       text: `✅✅ 시장가 매도 진행 ✅✅
 ✅✅ 시장가 매도 진행 ✅✅
 
 모든 회차 정리 진행하겠습니다`,
     },
-    requireSent: false,
+    requirePrimarySent: false,
   });
 }
 
 async function forwardMessageToTarget(message) {
-  if (!TARGET_CHAT_ID) {
-    throw new Error("TARGET_CHAT_ID가 Render 환경변수 또는 .env에 없습니다.");
-  }
-
-  return telegramApi("forwardMessage", {
-    chat_id: TARGET_CHAT_ID,
-    from_chat_id: message.chat.id,
-    message_id: message.message_id,
-  });
+  return forwardMessageToAllTargets(message);
 }
 
 async function sendTextMessageToTarget(text) {
-  if (!TARGET_CHAT_ID) {
-    throw new Error("TARGET_CHAT_ID가 Render 환경변수 또는 .env에 없습니다.");
-  }
-
-  return telegramApi("sendMessage", {
-    chat_id: TARGET_CHAT_ID,
-    text,
-  });
+  return sendMessageToAllTargets({ text });
 }
 
 function isDailyCloseNoticeTime() {
@@ -1497,33 +1639,32 @@ async function checkDailyCloseNoticeOnce(options = {}) {
 
     const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
 
-    const sendResult = await sendTelegramEvent({
+    const sendResult = await sendTelegramEventToTargets({
       eventKey,
       tradeDate,
       eventType: "DAILY_CLOSE",
       method: "sendMessage",
       body: {
-        chat_id: TARGET_CHAT_ID,
         text: DAILY_CLOSE_NOTICE_TEXT,
         parse_mode: "HTML",
       },
-      requireSent: false,
+      requirePrimarySent: false,
     });
 
-    if (sendResult.status === "sent") {
-      console.log(`금일 마감 안내 전송 완료: ${tradeDate}`);
+    if (sendResult.allSent) {
+      console.log(`금일 마감 안내 전체 전달방 전송 완료: ${tradeDate}`);
       return true;
     }
 
-    if (sendResult.status === "needs_check") {
+    if (sendResult.hasNeedsCheck) {
       console.error(
-        `금일 마감 안내 전송 여부 확인 필요: ${tradeDate}`
+        `금일 마감 안내 일부 전달방 전송 여부 확인 필요: ${tradeDate}`
       );
       return false;
     }
 
     console.error(
-      `금일 마감 안내 전송 대기/실패: ${tradeDate} (${sendResult.status})`
+      `금일 마감 안내 일부 전달방 전송 대기/실패: ${tradeDate}`
     );
 
     return false;
@@ -1762,20 +1903,20 @@ async function handleSignalMessage(message) {
     const signalEventKey =
       `SOURCE:${sourceChatId}:${message.message_id}:NEW_SIGNAL`;
 
-    const forwardedEvent = await sendTelegramEvent({
+    const forwardedTargets = await sendTelegramEventToTargets({
       eventKey: signalEventKey,
       tradeDate: getTodayLogDate(),
       eventType: "NEW_SIGNAL",
+      secondaryEventType: "NEW_SIGNAL_COPY",
       method: "forwardMessage",
       body: {
-        chat_id: TARGET_CHAT_ID,
         from_chat_id: message.chat.id,
         message_id: message.message_id,
       },
-      requireSent: true,
+      requirePrimarySent: true,
     });
 
-    const forwarded = forwardedEvent.result;
+    const forwarded = forwardedTargets.primary?.result;
 
     if (!forwarded?.message_id) {
       throw new Error(
@@ -1800,8 +1941,8 @@ async function handleSignalMessage(message) {
 
     const savedSignal = await createSentSignalLog(newSignal);
 
-    await linkTelegramEventToSignal(
-      signalEventKey,
+    await linkTelegramEventsToSignal(
+      forwardedTargets.deliveries,
       savedSignal.id
     );
 
@@ -2106,14 +2247,7 @@ function mapTradeWatch(row) {
 }
 
 async function sendWatchTelegramMessage(text) {
-  if (!TARGET_CHAT_ID) {
-    throw new Error("TARGET_CHAT_ID가 없습니다.");
-  }
-
-  return telegramApi("sendMessage", {
-    chat_id: TARGET_CHAT_ID,
-    text,
-  });
+  return sendMessageToAllTargets({ text });
 }
 
 async function fetchXauUsdPrice() {
@@ -3221,22 +3355,21 @@ async function checkTradeWatchOnce(options = {}) {
       const slEventKey =
         `${getTradeWatchEventPrefix(watch)}:SL`;
 
-      const slSendResult = await sendTelegramEvent({
+      const slSendResult = await sendTelegramEventToTargets({
         eventKey: slEventKey,
         tradeDate: getTradeDateForWatch(watch),
         eventType: "SL",
         signalLogId: activeSignal?.id || null,
         method: "sendMessage",
         body: {
-          chat_id: TARGET_CHAT_ID,
           text: makeSlReachMessage(),
         },
-        requireSent: false,
+        requirePrimarySent: false,
       });
 
-      if (slSendResult.status === "needs_check") {
+      if (slSendResult.hasNeedsCheck) {
         console.error(
-          `SL 메시지 전송 여부 확인 필요: ${slEventKey}`
+          `SL 메시지 일부 전달방 전송 여부 확인 필요: ${slEventKey}`
         );
       }
 
@@ -3275,14 +3408,13 @@ async function checkTradeWatchOnce(options = {}) {
       const entry2EventKey =
         `${getTradeWatchEventPrefix(watch)}:ENTRY2`;
 
-      const entry2SendResult = await sendTelegramEvent({
+      const entry2SendResult = await sendTelegramEventToTargets({
         eventKey: entry2EventKey,
         tradeDate: getTradeDateForWatch(watch),
         eventType: "ENTRY2",
         signalLogId: activeSignal?.id || null,
         method: "sendMessage",
         body: {
-          chat_id: TARGET_CHAT_ID,
           text: makeEntryReachMessage({
             direction,
             round: 2,
@@ -3291,12 +3423,12 @@ async function checkTradeWatchOnce(options = {}) {
             sl: slPrice,
           }),
         },
-        requireSent: false,
+        requirePrimarySent: false,
       });
 
-      if (entry2SendResult.status === "needs_check") {
+      if (entry2SendResult.hasNeedsCheck) {
         console.error(
-          `2차 진입 메시지 전송 여부 확인 필요: ${entry2EventKey}`
+          `2차 진입 메시지 일부 전달방 전송 여부 확인 필요: ${entry2EventKey}`
         );
       }
 
@@ -3347,22 +3479,21 @@ async function checkTradeWatchOnce(options = {}) {
       const tpEventKey =
         `${getTradeWatchEventPrefix(watch)}:TP`;
 
-      const tpSendResult = await sendTelegramEvent({
+      const tpSendResult = await sendTelegramEventToTargets({
         eventKey: tpEventKey,
         tradeDate: getTradeDateForWatch(watch),
         eventType: "TP",
         signalLogId: activeSignal?.id || null,
         method: "sendMessage",
         body: {
-          chat_id: TARGET_CHAT_ID,
           text: makeTpReachMessage(),
         },
-        requireSent: false,
+        requirePrimarySent: false,
       });
 
-      if (tpSendResult.status === "needs_check") {
+      if (tpSendResult.hasNeedsCheck) {
         console.error(
-          `TP 메시지 전송 여부 확인 필요: ${tpEventKey}`
+          `TP 메시지 일부 전달방 전송 여부 확인 필요: ${tpEventKey}`
         );
       }
 
@@ -3414,7 +3545,7 @@ app.get("/api/telegram-events", async (req, res) => {
     let query = db
       .from("telegram_events")
       .select(
-        "event_key, trade_date, event_type, signal_log_id, status, attempt_count, telegram_message_id, last_error, locked_at, sent_at, created_at, updated_at"
+        "event_key, trade_date, event_type, signal_log_id, chat_id, status, attempt_count, telegram_message_id, last_error, locked_at, sent_at, created_at, updated_at"
       )
       .order("created_at", { ascending: false })
       .limit(100);
@@ -4063,11 +4194,16 @@ app.get("/api/test-forward-latest", async (req, res) => {
 
     res.json({
       ok: true,
-      message: "최신 이미지 신호를 전달방으로 전달했습니다.",
+      message: "최신 이미지 신호를 설정된 전달방으로 전달했습니다.",
       sourceRoom: getSourceRoom(latestMessage.chat.id),
       sourceChatId: latestMessage.chat.id,
       sourceMessageId: latestMessage.message_id,
-      forwardedMessageId: forwarded.message_id,
+      deliveries: forwarded.map((delivery) => ({
+        chatId: delivery.chatId,
+        ok: delivery.ok,
+        forwardedMessageId: delivery.result?.message_id || null,
+        error: delivery.error || null,
+      })),
     });
   } catch (error) {
     res.status(500).json({
@@ -4146,7 +4282,7 @@ app.post("/api/tradingview-webhook", async (req, res) => {
 
     res.json({
       ok: true,
-      message: "트레이딩뷰 알림을 텔레그램으로 전송했습니다.",
+      message: "트레이딩뷰 알림을 설정된 전달방으로 전송했습니다.",
       sentText: message,
     });
   } catch (error) {
