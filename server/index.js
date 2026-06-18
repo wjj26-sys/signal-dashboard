@@ -934,7 +934,11 @@ async function checkDailyCloseNoticeOnce() {
     }
 
     try {
-      await sendTextMessageToTarget(DAILY_CLOSE_NOTICE_TEXT);
+      await telegramApi("sendMessage", {
+        chat_id: TARGET_CHAT_ID,
+        text: DAILY_CLOSE_NOTICE_TEXT,
+        parse_mode: "HTML",
+      });
     } catch (error) {
       // 실제 텔레그램 전송 실패일 때만 선점을 풀어 다음 확인에서 재시도합니다.
       try {
