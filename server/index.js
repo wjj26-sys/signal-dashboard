@@ -48,6 +48,17 @@ let signalRunning = false;
 let testMode = false;
 let activeSignal = null;
 let tradeWatchCheckInProgress = false;
+let dailyCloseNoticeCheckInProgress = false;
+let signalForwardInProgress = false;
+
+const DAILY_CLOSE_NOTICE_MARKER_SYMBOL = "__DAILY_CLOSE_NOTICE__";
+const DAILY_CLOSE_NOTICE_TEXT = `< 운영시간 안내 >
+✔️오전 7:00~ 01:00(익일 새벽 1시) 운영
+
+금일 매매 여기까진 진행하도록 하겠습니다.
+
+늦은시간까지 고생하셨습니다.`;
+const dailyCloseNoticeMemory = new Set();
 
 let sentSignals = [];
 let blockedSignals = [];
@@ -712,10 +723,14 @@ function enrichArchive(group) {
   };
 }
 
+function isVisiblePositionRecord(record) {
+  return record?.symbol !== DAILY_CLOSE_NOTICE_MARKER_SYMBOL;
+}
+
 function groupRecordsByWeek(records) {
   const archiveMap = new Map();
 
-  records.forEach((record) => {
+  records.filter(isVisiblePositionRecord).forEach((record) => {
     const weekKey = record.week_key;
 
     if (!archiveMap.has(weekKey)) {
@@ -825,6 +840,139 @@ async function sendTextMessageToTarget(text) {
     chat_id: TARGET_CHAT_ID,
     text,
   });
+}
+
+function isDailyCloseNoticeTime() {
+  const now = getKstNow();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+
+  // 새벽 1시부터 오전 7시 잠금 해제 전까지만 마감 안내를 보냅니다.
+  return minutes >= 1 * 60 && minutes < 7 * 60;
+}
+
+async function claimDailyCloseNotice(tradeDate) {
+  if (!supabase) {
+    if (dailyCloseNoticeMemory.has(tradeDate)) {
+      return false;
+    }
+
+    dailyCloseNoticeMemory.add(tradeDate);
+    return { tradeDate };
+  }
+
+  const { data, error } = await supabase
+    .from("position_records")
+    .insert({
+      record_date: tradeDate,
+      symbol: DAILY_CLOSE_NOTICE_MARKER_SYMBOL,
+      week_key: getWeekKey(tradeDate),
+      content: "pending",
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    // record_date + symbol 고유값이 이미 있으면 오늘 마감 안내가 선점된 상태입니다.
+    if (error.code === "23505") {
+      return false;
+    }
+
+    throw error;
+  }
+
+  return data;
+}
+
+async function releaseDailyCloseNoticeClaim(tradeDate) {
+  if (!supabase) {
+    dailyCloseNoticeMemory.delete(tradeDate);
+    return;
+  }
+
+  const { error } = await supabase
+    .from("position_records")
+    .delete()
+    .eq("record_date", tradeDate)
+    .eq("symbol", DAILY_CLOSE_NOTICE_MARKER_SYMBOL)
+    .eq("content", "pending");
+
+  if (error) throw error;
+}
+
+async function completeDailyCloseNoticeClaim(tradeDate) {
+  if (!supabase) return;
+
+  const { error } = await supabase
+    .from("position_records")
+    .update({ content: "sent" })
+    .eq("record_date", tradeDate)
+    .eq("symbol", DAILY_CLOSE_NOTICE_MARKER_SYMBOL)
+    .eq("content", "pending");
+
+  if (error) throw error;
+}
+
+async function checkDailyCloseNoticeOnce() {
+  if (dailyCloseNoticeCheckInProgress) return false;
+  if (!isDailyCloseNoticeTime()) return false;
+
+  dailyCloseNoticeCheckInProgress = true;
+
+  try {
+    await syncSignalLogsFromDb();
+
+    // 1시 직전에 접수된 신호가 저장 중이거나 진행 중이면 마감 안내를 기다립니다.
+    if (signalForwardInProgress || signalRunning || activeSignal) {
+      return false;
+    }
+
+    const tradeDate = getTodayLogDate();
+    const claim = await claimDailyCloseNotice(tradeDate);
+
+    if (!claim) {
+      return false;
+    }
+
+    try {
+      await sendTextMessageToTarget(DAILY_CLOSE_NOTICE_TEXT);
+    } catch (error) {
+      // 실제 텔레그램 전송 실패일 때만 선점을 풀어 다음 확인에서 재시도합니다.
+      try {
+        await releaseDailyCloseNoticeClaim(tradeDate);
+      } catch (releaseError) {
+        console.error(
+          "마감 안내 선점 해제 실패:",
+          releaseError.message
+        );
+      }
+
+      throw error;
+    }
+
+    // 메시지는 이미 전송됐으므로 DB 완료 표시가 실패해도 pending 선점은 유지해 중복을 막습니다.
+    try {
+      await completeDailyCloseNoticeClaim(tradeDate);
+    } catch (completeError) {
+      console.error(
+        "마감 안내 완료 상태 저장 실패(중복 방지 선점은 유지):",
+        completeError.message
+      );
+    }
+
+    console.log(`금일 마감 안내 전송 완료: ${tradeDate}`);
+    return true;
+  } finally {
+    dailyCloseNoticeCheckInProgress = false;
+  }
+}
+
+async function tryDailyCloseNoticeAfterPositionFinish() {
+  try {
+    await checkDailyCloseNoticeOnce();
+  } catch (error) {
+    // 마감 안내 실패가 포지션 종료 자체를 실패시키지는 않도록 분리합니다.
+    console.error("금일 마감 안내 자동 전송 실패:", error.message);
+  }
 }
 
 const PRICE_PROVIDER = process.env.PRICE_PROVIDER || "goldapi_net";
@@ -1032,6 +1180,8 @@ async function handleSignalMessage(message) {
     return;
   }
 
+  signalForwardInProgress = true;
+
   try {
     const maxOrder = sentSignals.reduce(
       (max, item) => Math.max(max, Number(item.order) || 0),
@@ -1092,6 +1242,8 @@ async function handleSignalMessage(message) {
   } catch (error) {
     await releaseTodaySignalLock();
     throw error;
+  } finally {
+    signalForwardInProgress = false;
   }
 }
 
@@ -2357,6 +2509,8 @@ async function finishPositionAfterAutomaticExit(
     );
   }
 
+  await tryDailyCloseNoticeAfterPositionFinish();
+
   return finishedSignal;
 }
 
@@ -2621,6 +2775,7 @@ app.post("/api/manual-on", async (req, res) => {
     activeSignal = null;
 
     await syncSignalLogsFromDb();
+    await tryDailyCloseNoticeAfterPositionFinish();
 
     res.json({
       ok: true,
@@ -2730,6 +2885,7 @@ app.post("/api/finish-signal", async (req, res) => {
     }
 
     await syncSignalLogsFromDb();
+    await tryDailyCloseNoticeAfterPositionFinish();
 
     res.json({
       ok: true,
@@ -2951,7 +3107,7 @@ app.get("/api/position-records", async (req, res) => {
 
     res.json({
       ok: true,
-      records: data || [],
+      records: (data || []).filter(isVisiblePositionRecord),
       archives,
     });
   } catch (error) {
@@ -3066,7 +3222,8 @@ app.delete("/api/position-records/week/:weekKey", async (req, res) => {
     const { error } = await db
       .from("position_records")
       .delete()
-      .eq("week_key", weekKey);
+      .eq("week_key", weekKey)
+      .neq("symbol", DAILY_CLOSE_NOTICE_MARKER_SYMBOL);
 
     if (error) throw error;
 
@@ -3321,3 +3478,17 @@ app.listen(PORT, () => {
 setInterval(() => {
   checkTradeWatchOnce();
 }, PRICE_POLL_SECONDS * 1000);
+
+// 새벽 1시 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
+setInterval(() => {
+  checkDailyCloseNoticeOnce().catch((error) => {
+    console.error("금일 마감 안내 확인 실패:", error.message);
+  });
+}, 10 * 1000);
+
+// 서버가 새벽 잠금 시간에 재시작되어도 미전송된 마감 안내를 확인합니다.
+setTimeout(() => {
+  checkDailyCloseNoticeOnce().catch((error) => {
+    console.error("서버 시작 후 마감 안내 확인 실패:", error.message);
+  });
+}, 3000);
