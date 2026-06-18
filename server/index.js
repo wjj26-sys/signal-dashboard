@@ -52,8 +52,8 @@ let dailyCloseNoticeCheckInProgress = false;
 let signalForwardInProgress = false;
 
 const DAILY_CLOSE_NOTICE_MARKER_SYMBOL = "__DAILY_CLOSE_NOTICE__";
-const DAILY_CLOSE_NOTICE_TEXT = `< 운영시간 안내 >
-✔️오전 7:00~ 01:00(익일 새벽 1시) 운영
+const DAILY_CLOSE_NOTICE_TEXT = `&lt; 운영시간 안내 &gt;
+<blockquote>✔️오전 7:00~ 01:00(익일 새벽 1시) 운영</blockquote>
 
 금일 매매 여기까진 진행하도록 하겠습니다.
 
