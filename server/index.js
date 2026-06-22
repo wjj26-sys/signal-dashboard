@@ -113,6 +113,16 @@ function getTodayLogDate() {
   return toDateText(now);
 }
 
+function isWeekendTradeDate(dateText = getTodayLogDate()) {
+  const date = new Date(`${dateText}T00:00:00`);
+
+  if (Number.isNaN(date.getTime())) return false;
+
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+
+  return day === 0 || day === 6;
+}
+
 // signal_locks는 실제 달력 날짜 기준으로 유지해 운영 잠금 로직을 바꾸지 않습니다.
 function getSignalLockDate() {
   return getCalendarDate();
@@ -136,9 +146,9 @@ function getAutoScheduleState() {
   const minutes = hour * 60 + minute;
 
   // 신규 신호 수신 시간(KST)
-  // 23:00 ~ 01:00 수신 가능
-  // 01:00 ~ 23:00 자동 잠금
-  // 이미 진행 중인 포지션의 진입가/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
+  // 23:00 ~ 01:00만 자동 수신 가능합니다.
+  // 01:00 ~ 23:00에는 신규 신호를 자동 전송하지 않습니다.
+  // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
   const openStart = 23 * 60;
   const openEnd = 1 * 60;
 
@@ -1649,6 +1659,10 @@ function isDailyCloseNoticeTime() {
 async function checkDailyCloseNoticeOnce(options = {}) {
   if (dailyCloseNoticeCheckInProgress) return false;
 
+  // 관리자가 잠금을 눌러둔 상태에서는 휴장일/비상상황으로 보고
+  // 마감 안내도 자동 전송하지 않습니다.
+  if (!botEnabled) return false;
+
   const requestedTradeDate = String(
     options.tradeDate || ""
   ).trim();
@@ -1675,6 +1689,12 @@ async function checkDailyCloseNoticeOnce(options = {}) {
     // 포지션이 오전 7시 이후 끝난 경우에는 해당 포지션의 기존 매매일을 유지합니다.
     const tradeDate =
       requestedTradeDate || getTodayLogDate();
+
+    // 주말 매매일에는 차트가 멈춰 있어도 마감 안내를 전송하지 않습니다.
+    // 금요일 밤 23:00~토요일 01:00 포지션은 금요일 매매일로 보고 정상 마감 가능합니다.
+    if (isWeekendTradeDate(tradeDate)) {
+      return false;
+    }
 
     // 2차 진입·TP·SL·시장가 종료 메시지가 전송 완료되기 전에는
     // 마감 안내를 먼저 보내지 않습니다.
