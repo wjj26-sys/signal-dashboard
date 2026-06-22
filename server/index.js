@@ -80,6 +80,7 @@ function getKstNow() {
   );
 }
 
+
 function getTimeText() {
   const now = getKstNow();
 
@@ -668,8 +669,11 @@ async function createBlockedSignalLog(payload) {
   return mapped;
 }
 
-async function finishActiveSignalLog() {
+async function finishActiveSignalLog(options = {}) {
   const endedAt = getTimeText();
+  const finishStatus = options.status || "종료";
+  const finishResultSummary = options.resultSummary;
+
 
   await syncSignalLogsFromDb();
 
@@ -682,12 +686,18 @@ async function finishActiveSignalLog() {
   const finishingSignal = activeSignal;
 
   if (supabase) {
+    const updatePayload = {
+      status: finishStatus,
+      ended_at: endedAt,
+    };
+
+    if (finishResultSummary !== undefined) {
+      updatePayload.result_summary = finishResultSummary;
+    }
+
     const { data: updatedRow, error: updateError } = await supabase
       .from("signal_logs")
-      .update({
-        status: "종료",
-        ended_at: endedAt,
-      })
+      .update(updatePayload)
       .eq("id", finishingSignal.id)
       .eq("log_type", "sent")
       .eq("status", "진행중")
@@ -713,7 +723,10 @@ async function finishActiveSignalLog() {
         throw new Error("종료할 포지션 기록을 찾지 못했습니다.");
       }
 
-      if (existingRow.status !== "종료") {
+      if (
+        existingRow.status !== finishStatus &&
+        existingRow.status !== "종료"
+      ) {
         throw new Error("포지션 종료 상태가 DB에 반영되지 않았습니다.");
       }
 
@@ -746,15 +759,23 @@ async function finishActiveSignalLog() {
     return mapSentLog(closedRow);
   }
 
-  finishingSignal.status = "종료";
+  finishingSignal.status = finishStatus;
   finishingSignal.endedAt = endedAt;
+  finishingSignal.resultSummary =
+    finishResultSummary === undefined
+      ? finishingSignal.resultSummary
+      : finishResultSummary;
 
   sentSignals = sentSignals.map((item) =>
     String(item.id) === String(finishingSignal.id)
       ? {
           ...item,
-          status: "종료",
+          status: finishStatus,
           endedAt,
+          resultSummary:
+            finishResultSummary === undefined
+              ? item.resultSummary
+              : finishResultSummary,
         }
       : item
   );
@@ -1506,6 +1527,42 @@ async function linkTelegramEventToSignal(eventKey, signalLogId) {
   if (error) throw error;
 }
 
+async function cancelPendingTelegramEventsForSignal(
+  signalLogId,
+  reason = "관리자 조용히 종료로 전송 취소"
+) {
+  if (signalLogId === null || signalLogId === undefined) return;
+
+  const protectedTypes = ["ENTRY2", "TP", "SL", "MARKET_CLOSE"];
+  const cancellableStatuses = ["pending", "failed", "processing"];
+
+  if (!supabase) {
+    for (const [eventKey, event] of telegramEventMemory.entries()) {
+      if (
+        String(event.signal_log_id || "") === String(signalLogId) &&
+        protectedTypes.includes(event.event_type) &&
+        cancellableStatuses.includes(event.status)
+      ) {
+        telegramEventMemory.delete(eventKey);
+      }
+    }
+
+    return;
+  }
+
+  const { error } = await supabase
+    .from("telegram_events")
+    .delete()
+    .eq("signal_log_id", String(signalLogId))
+    .in("event_type", protectedTypes)
+    .in("status", cancellableStatuses);
+
+  if (error) {
+    console.error(`${reason}: 텔레그램 예약 이벤트 삭제 실패`, error.message);
+    throw error;
+  }
+}
+
 async function retryFailedTelegramEvents() {
   if (!supabase) return;
 
@@ -1547,7 +1604,7 @@ async function hasUnresolvedPositionTelegramEvents(tradeDate) {
       (event) =>
         String(event.trade_date) === String(tradeDate) &&
         protectedTypes.includes(event.event_type) &&
-        event.status !== "sent"
+        !["sent", "cancelled"].includes(event.status)
     );
   }
 
@@ -1556,7 +1613,7 @@ async function hasUnresolvedPositionTelegramEvents(tradeDate) {
     .select("event_key")
     .eq("trade_date", tradeDate)
     .in("event_type", protectedTypes)
-    .neq("status", "sent")
+    .not("status", "in", "(sent,cancelled)")
     .limit(1);
 
   if (error) throw error;
@@ -3308,6 +3365,21 @@ async function checkTradeWatchOnce(options = {}) {
       await syncSignalLogsFromDb();
     }
 
+    // 진행 중인 시그널이 없으면 남아 있는 감시 상태만 조용히 끄고
+    // 2차/TP/SL 문자는 절대 보내지 않습니다.
+    if (!activeSignal) {
+      try {
+        await stopTradeWatchState("no_active_signal_silent_stop");
+      } catch (stopError) {
+        console.error(
+          "진행 중 포지션 없음으로 자동 감시 중지 실패:",
+          stopError.message
+        );
+      }
+
+      return;
+    }
+
     const { data: watch, error } = await db
       .from("trade_watch_state")
       .select("*")
@@ -3650,6 +3722,72 @@ app.post("/api/manual-off", async (req, res) => {
     res.json({
       ok: true,
       message: "관리자 잠금 상태입니다. 봇이 OFF되었습니다.",
+      botEnabled,
+      signalRunning,
+      canReceiveSignal: false,
+      activeSignal,
+      sentSignals,
+      blockedSignals,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/force-close-silent", async (req, res) => {
+  try {
+    await syncSignalLogsFromDb();
+
+    const closedSignalId = activeSignal?.id || null;
+    const closedTradeDate =
+      activeSignal?.logDate || getTodayLogDate();
+
+    try {
+      await stopTradeWatchState("silent_force_close");
+    } catch (stopError) {
+      console.error(
+        "조용히 종료 중 자동 감시 중지 실패:",
+        stopError.message
+      );
+    }
+
+    if (closedSignalId) {
+      await cancelPendingTelegramEventsForSignal(
+        closedSignalId,
+        "관리자 조용히 종료로 전송 취소"
+      );
+    }
+
+    let closedSignal = null;
+
+    if (activeSignal && activeSignal.status === "진행중") {
+      closedSignal = await finishActiveSignalLog({
+        status: "종료",
+        resultSummary: "조용히 종료",
+      });
+    } else {
+      signalRunning = false;
+      activeSignal = null;
+      await releaseTodaySignalLock();
+    }
+
+    // 조용히 종료 후에는 실수로 바로 새 신호를 받지 않도록 잠금 상태를 유지합니다.
+    botEnabled = false;
+    signalRunning = false;
+    activeSignal = null;
+
+    await syncSignalLogsFromDb();
+
+    res.json({
+      ok: true,
+      message:
+        "현재 포지션을 문자 없이 조용히 종료했습니다. 전달방에는 아무 메시지도 보내지 않았습니다.",
+      closedSignalId,
+      closedTradeDate,
+      closedSignal,
       botEnabled,
       signalRunning,
       canReceiveSignal: false,

@@ -1324,6 +1324,37 @@ const calcText = useMemo(() => {
     await fetchTradeWatch();
   };
 
+  const handleSilentForceClose = async () => {
+    if (!checkAdminPassword()) return;
+
+    const ok = window.confirm(
+      "전달방에는 아무 문자도 보내지 않고, 현재 진행 중 포지션 감시만 완전히 종료할까요?\n\n이 작업은 나중에 TP/SL/시장가 종료 문자를 다시 보내지 않습니다."
+    );
+
+    if (!ok) return;
+
+    const data = await postServerAction("/api/force-close-silent");
+
+    if (!data?.ok) {
+      alert(data?.error || "조용히 종료에 실패했어요.");
+      return;
+    }
+
+    setMarketExitInfo(null);
+    localStorage.removeItem(MARKET_EXIT_STORAGE_KEY);
+    setSelectedSignalId("");
+    setPositionDraft(makePositionDraft());
+
+    finishCurrentSignal();
+    await fetchTradeWatch();
+    await fetchServerStatus();
+
+    alert(
+      data.message ||
+        "현재 포지션을 문자 없이 조용히 종료했습니다."
+    );
+  };
+
   const checkAdminPassword = () => {
     const input = window.prompt("관리자 비밀번호를 입력해주세요.");
 
@@ -1505,6 +1536,21 @@ const calcText = useMemo(() => {
                 disabled={serverLoading || isUiLocked}
               >
                 포지션 종료
+              </button>
+
+              <button
+                className="sub-button"
+                onClick={handleSilentForceClose}
+                disabled={
+                  serverLoading ||
+                  !(
+                    serverStatus?.signalRunning ||
+                    serverActiveSignal ||
+                    currentSignal
+                  )
+                }
+              >
+                조용히 종료
               </button>
 
               <button
