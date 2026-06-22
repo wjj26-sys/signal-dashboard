@@ -54,7 +54,7 @@ let signalForwardInProgress = false;
 
 const DAILY_CLOSE_NOTICE_MARKER_SYMBOL = "__DAILY_CLOSE_NOTICE__";
 const DAILY_CLOSE_NOTICE_TEXT = `&lt; 운영시간 안내 &gt;
-<blockquote>✔️오전 7:00~ 01:00(익일 새벽 1시) 운영</blockquote>
+<blockquote>✔️오전 9:00~ 01:00(익일 새벽 1시) 운영</blockquote>
 
 금일 매매 여기까지 진행하도록 하겠습니다.
 
@@ -136,25 +136,13 @@ function getAutoScheduleState() {
   const minutes = hour * 60 + minute;
 
   // 신규 신호 수신 시간(KST)
-  // 07:00 ~ 09:00 수신 가능
-  // 09:00 ~ 23:00 자동 잠금
   // 23:00 ~ 01:00 수신 가능
-  // 01:00 ~ 07:00 자동 잠금
+  // 01:00 ~ 23:00 자동 잠금
   // 이미 진행 중인 포지션의 진입가/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
-  const openStart1 = 7 * 60;
-  const openEnd1 = 9 * 60;
+  const openStart = 23 * 60;
+  const openEnd = 1 * 60;
 
-  const lockStart = 9 * 60;
-  const lockEnd = 23 * 60;
-
-  const openStart2 = 23 * 60;
-  const lockStart2 = 1 * 60;
-
-  const isFirstOpen = minutes >= openStart1 && minutes < openEnd1;
-  const isSecondOpen = minutes >= openStart2 || minutes < lockStart2;
-  const isLockTime = minutes >= lockStart && minutes < lockEnd;
-
-  const isOpen = (isFirstOpen || isSecondOpen) && !isLockTime;
+  const isOpen = minutes >= openStart || minutes < openEnd;
 
   if (isOpen) {
     return {
