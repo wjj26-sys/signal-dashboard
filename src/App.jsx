@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import SetupChart from "./SetupChart.jsx";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "https://signal-telegram-server.onrender.com";
+const API_BASE_URL = "https://signal-telegram-server.onrender.com";
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "0529";
 const AUTH_STORAGE_KEY = "signal-dashboard-auth-v1";
 const MARKET_EXIT_STORAGE_KEY = "signal-dashboard-market-exit-v1";
@@ -183,10 +183,10 @@ function calculateTp({ direction, baseEntry, entry2, tpGap }) {
       ? base + sign * gap
       : null;
 
-  // 2차 평균가 = 1차 2랏 + 2차 1랏
+  // 2차 평균가 = 1차 1랏 + 2차 1랏
   const secondAverage =
     Number.isFinite(base) && Number.isFinite(e2)
-      ? (base * 2 + e2) / 3
+      ? (base + e2) / 2
       : null;
 
   // 2차 TP = 2차 평균가 ± TP 간격
@@ -205,7 +205,7 @@ function calculateTp({ direction, baseEntry, entry2, tpGap }) {
 const XAUUSD_VALUE_PER_LOT = 100;
 
 const POSITION_LOTS = {
-  1: 2,
+  1: 1,
   2: 1,
 };
 
@@ -1708,7 +1708,7 @@ const calcText = useMemo(() => {
 
             <div className="form-grid">
               <div className="form-field">
-                <label>1차 진입가 / 2랏</label>
+                <label>1차 진입가 / 1랏</label>
                 <input
                   type="number"
                   value={baseEntry}
@@ -1750,7 +1750,7 @@ const calcText = useMemo(() => {
 
             <p className="muted-note">
               계산식: 1차 TP는 1차 진입가에 TP 간격을 적용하고, 2차 TP는
-              1차 2랏과 2차 1랏의 가중평균가에 TP 간격을 적용합니다.
+              1차 1랏과 2차 1랏의 평균가에 TP 간격을 적용합니다.
             </p>
           </div>
 
