@@ -1374,6 +1374,25 @@ const calcText = useMemo(() => {
     await postServerAction("/api/manual-off");
   };
 
+  const handleOperatingLockDashboard = async () => {
+    if (!checkAdminPassword()) return;
+
+    const ok = window.confirm(
+      "마감멘트를 전달방에 보낸 뒤 운영잠금으로 전환할까요?\n\n신규 신호는 차단되지만, 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 계속 유지됩니다."
+    );
+
+    if (!ok) return;
+
+    const data = await postServerAction("/api/operating-lock");
+
+    if (!data?.ok) {
+      alert(data?.error || "운영잠금 처리에 실패했어요.");
+      return;
+    }
+
+    alert(data.message || "운영잠금 상태로 전환했습니다.");
+  };
+
   const handleUnlockDashboard = async () => {
     if (!checkAdminPassword()) return;
 
@@ -1563,6 +1582,14 @@ const calcText = useMemo(() => {
 
               <button
                 className="sub-button"
+                onClick={handleOperatingLockDashboard}
+                disabled={serverLoading || isUiLocked}
+              >
+                운영잠금
+              </button>
+
+              <button
+                className="sub-button"
                 onClick={() => setShowChart(true)}
                 disabled={serverLoading}
               >
@@ -1574,6 +1601,7 @@ const calcText = useMemo(() => {
               <strong>운영 규칙</strong>
               <p>
                 봇은 기본적으로 ON 상태입니다. 잠금 시 봇이 OFF되고, 화면 일부 조작이 제한됩니다.
+                운영잠금은 마감멘트를 보낸 뒤 신규 신호만 차단하며, 진행 중 포지션의 2차 진입/TP/SL 감시는 유지됩니다.
                 잠금 해제 시 자동으로 전달 가능 상태가 됩니다.
               </p>
             </div>

@@ -1696,6 +1696,36 @@ function isDailyCloseNoticeTime() {
   );
 }
 
+function shouldBlockManualCloseNoticeOnWeekend() {
+  const now = getKstNow();
+  const day = now.getDay();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+
+  // 토요일 00:00~00:59는 금요일 야간 세션의 연장으로 봅니다.
+  // 그 외 토요일/일요일은 운영일이 아니므로 수동 운영잠금에서도 마감멘트를 보내지 않습니다.
+  if (day === 0) return true;
+  if (day === 6 && minutes >= 1 * 60) return true;
+
+  return false;
+}
+
+async function sendDailyCloseNoticeForTradeDate(tradeDate) {
+  const normalizedTradeDate = String(tradeDate || getTodayLogDate()).trim();
+  const eventKey = `TRADE_DATE:${normalizedTradeDate}:DAILY_CLOSE`;
+
+  return sendTelegramEventToTargets({
+    eventKey,
+    tradeDate: normalizedTradeDate,
+    eventType: "DAILY_CLOSE",
+    method: "sendMessage",
+    body: {
+      text: DAILY_CLOSE_NOTICE_TEXT,
+      parse_mode: "HTML",
+    },
+    requirePrimarySent: false,
+  });
+}
+
 async function checkDailyCloseNoticeOnce(options = {}) {
   if (dailyCloseNoticeCheckInProgress) return false;
 
@@ -1738,19 +1768,7 @@ async function checkDailyCloseNoticeOnce(options = {}) {
       return false;
     }
 
-    const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
-
-    const sendResult = await sendTelegramEventToTargets({
-      eventKey,
-      tradeDate,
-      eventType: "DAILY_CLOSE",
-      method: "sendMessage",
-      body: {
-        text: DAILY_CLOSE_NOTICE_TEXT,
-        parse_mode: "HTML",
-      },
-      requirePrimarySent: false,
-    });
+    const sendResult = await sendDailyCloseNoticeForTradeDate(tradeDate);
 
     if (sendResult.allSent) {
       console.log(`금일 마감 안내 전체 전달방 전송 완료: ${tradeDate}`);
@@ -3772,6 +3790,61 @@ app.post("/api/manual-off", async (req, res) => {
       activeSignal,
       sentSignals,
       blockedSignals,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/operating-lock", async (req, res) => {
+  try {
+    await syncSignalLogsFromDb();
+
+    const tradeDate = activeSignal?.logDate || getTodayLogDate();
+    let closeNoticeSent = false;
+    let closeNoticeSkippedReason = "";
+    let closeNoticeResult = null;
+
+    if (shouldBlockManualCloseNoticeOnWeekend()) {
+      closeNoticeSkippedReason =
+        "토요일/일요일은 운영일이 아니므로 마감멘트를 보내지 않고 잠금만 처리했습니다.";
+    } else {
+      closeNoticeResult = await sendDailyCloseNoticeForTradeDate(tradeDate);
+      closeNoticeSent = Boolean(
+        closeNoticeResult?.allSent || closeNoticeResult?.primary?.status === "sent"
+      );
+
+      if (!closeNoticeSent && closeNoticeResult?.hasNeedsCheck) {
+        closeNoticeSkippedReason =
+          "마감멘트 전송 여부 확인이 필요합니다. 중복 방지를 위해 이벤트 상태를 확인해주세요.";
+      }
+    }
+
+    // 운영잠금은 신규 신호만 차단합니다.
+    // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 끊지 않습니다.
+    botEnabled = false;
+
+    await syncSignalLogsFromDb();
+
+    res.json({
+      ok: true,
+      message: closeNoticeSent
+        ? "마감멘트 발송 후 운영잠금 상태로 전환했습니다. 진행 중 포지션 감시는 유지됩니다."
+        : closeNoticeSkippedReason ||
+          "운영잠금 상태로 전환했습니다. 진행 중 포지션 감시는 유지됩니다.",
+      botEnabled,
+      signalRunning,
+      canReceiveSignal: false,
+      activeSignal,
+      sentSignals,
+      blockedSignals,
+      tradeDate,
+      closeNoticeSent,
+      closeNoticeSkippedReason,
+      closeNoticeResult,
     });
   } catch (error) {
     res.status(500).json({
