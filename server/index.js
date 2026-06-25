@@ -53,12 +53,8 @@ let dailyCloseNoticeCheckInProgress = false;
 let signalForwardInProgress = false;
 
 const DAILY_CLOSE_NOTICE_MARKER_SYMBOL = "__DAILY_CLOSE_NOTICE__";
-const OPERATING_HOURS_NOTICE = `< 운영시간 안내 >
-<blockquote>✅ 월요일
-∨ 9:00 ~ 01:00(익일 새벽 1시) 운영
-
-✅ 화요일 ~ 금요일
-∨ 7:00 ~ 01:00(익일 새벽 1시) 운영</blockquote>
+const DAILY_CLOSE_NOTICE_TEXT = `&lt; 운영시간 안내 &gt;
+<blockquote>✔️오전 9:00~ 01:00(익일 새벽 1시) 운영</blockquote>
 
 금일 매매 여기까지 진행하도록 하겠습니다.
 
@@ -84,11 +80,6 @@ function getKstNow() {
   );
 }
 
-function isWeekendKst() {
-  const day = getKstNow().getDay();
-
-  return day === 0 || day === 6;
-}
 
 function getTimeText() {
   const now = getKstNow();
@@ -122,6 +113,16 @@ function getTodayLogDate() {
   return toDateText(now);
 }
 
+function isWeekendTradeDate(dateText = getTodayLogDate()) {
+  const date = new Date(`${dateText}T00:00:00`);
+
+  if (Number.isNaN(date.getTime())) return false;
+
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+
+  return day === 0 || day === 6;
+}
+
 // signal_locks는 실제 달력 날짜 기준으로 유지해 운영 잠금 로직을 바꾸지 않습니다.
 function getSignalLockDate() {
   return getCalendarDate();
@@ -139,55 +140,25 @@ function getWeekKey(dateText) {
 
 function getAutoScheduleState() {
   const now = getKstNow();
-  const day = now.getDay();
   const hour = now.getHours();
   const minute = now.getMinutes();
+
   const minutes = hour * 60 + minute;
 
-  // JS getDay(): 일요일 0, 월요일 1, 화요일 2, 수요일 3, 목요일 4, 금요일 5, 토요일 6
-  // B방 신규 신호 수신 시간(KST)
-  // 토요일·일요일: 운영하지 않음
-  // 월요일: 23:00 ~ 익일 01:00 운영
-  // 화요일~금요일: 07:00 ~ 09:00, 23:00 ~ 익일 01:00 운영
-  // 이미 진행 중인 포지션의 진입가/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
-  const previousDay = day === 0 ? 6 : day - 1;
+  // 신규 신호 수신 시간(KST)
+  // 23:00 ~ 01:00만 자동 수신 가능합니다.
+  // 01:00 ~ 23:00에는 신규 신호를 자동 전송하지 않습니다.
+  // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
+  const openStart = 23 * 60;
+  const openEnd = 1 * 60;
 
-  const isMonday = day === 1;
-  const isTuesdayToFriday = day >= 2 && day <= 5;
-  const previousDayWasMondayToFriday = previousDay >= 1 && previousDay <= 5;
-
-  const morningStart = 7 * 60;
-  const morningEnd = 9 * 60;
-  const nightStart = 23 * 60;
-  const nightEndAfterMidnight = 1 * 60;
-
-  const isMorningOpen =
-    isTuesdayToFriday && minutes >= morningStart && minutes < morningEnd;
-
-  const isNightOpenBeforeMidnight =
-    (isMonday || isTuesdayToFriday) && minutes >= nightStart;
-
-  // 00:00~01:00은 전날 밤 세션의 연장입니다.
-  // 예: 월요일 23:00~화요일 01:00, 금요일 23:00~토요일 01:00
-  const isNightOpenAfterMidnight =
-    previousDayWasMondayToFriday && minutes < nightEndAfterMidnight;
-
-  const isOpen =
-    isMorningOpen || isNightOpenBeforeMidnight || isNightOpenAfterMidnight;
+  const isOpen = minutes >= openStart || minutes < openEnd;
 
   if (isOpen) {
     return {
       isOpen: true,
       statusText: "자동 운영 시간",
       reason: "",
-    };
-  }
-
-  if (day === 0 || (day === 6 && minutes >= nightEndAfterMidnight)) {
-    return {
-      isOpen: false,
-      statusText: "주말 자동 잠금 시간",
-      reason: "주말 운영 시간이 아니어서 미전송",
     };
   }
 
@@ -350,8 +321,8 @@ function parseTelegramTradeSetup(message) {
 
   const sign = isLong ? 1 : -1;
 
-  // 새 비중: 1차 1랏 + 2차 1랏
-  const secondAverage = (baseEntry + entry2) / 2;
+  // 새 비중: 1차 2랏 + 2차 1랏
+  const secondAverage = (baseEntry * 2 + entry2) / 3;
   const secondTp = roundAutoTpPrice(
     direction,
     secondAverage + sign * tpGap
@@ -1679,54 +1650,18 @@ async function sendTextMessageToTarget(text) {
 
 function isDailyCloseNoticeTime() {
   const now = getKstNow();
-  const day = now.getDay();
-  const minutes = now.getHours() * 60 + now.getMinutes();
-  const previousDay = day === 0 ? 6 : day - 1;
-
-  // 야간 세션이 끝난 뒤에만 마감 안내를 보냅니다.
-  // 월요일~금요일 23:00~익일 01:00 운영이므로,
-  // 화요일~토요일 01:00~07:00 사이가 마감 안내 가능 시간입니다.
-  const previousDayWasMondayToFriday = previousDay >= 1 && previousDay <= 5;
-
-  return (
-    previousDayWasMondayToFriday &&
-    minutes >= 1 * 60 &&
-    minutes < 7 * 60
-  );
-}
-
-function shouldBlockManualCloseNoticeOnWeekend() {
-  const now = getKstNow();
-  const day = now.getDay();
   const minutes = now.getHours() * 60 + now.getMinutes();
 
-  // 토요일 00:00~00:59는 금요일 야간 세션의 연장으로 봅니다.
-  // 그 외 토요일/일요일은 운영일이 아니므로 수동 운영잠금에서도 마감멘트를 보내지 않습니다.
-  if (day === 0) return true;
-  if (day === 6 && minutes >= 1 * 60) return true;
-
-  return false;
-}
-
-async function sendDailyCloseNoticeForTradeDate(tradeDate) {
-  const normalizedTradeDate = String(tradeDate || getTodayLogDate()).trim();
-  const eventKey = `TRADE_DATE:${normalizedTradeDate}:DAILY_CLOSE`;
-
-  return sendTelegramEventToTargets({
-    eventKey,
-    tradeDate: normalizedTradeDate,
-    eventType: "DAILY_CLOSE",
-    method: "sendMessage",
-    body: {
-      text: DAILY_CLOSE_NOTICE_TEXT,
-      parse_mode: "HTML",
-    },
-    requirePrimarySent: false,
-  });
+  // 새벽 1시부터 오전 7시 잠금 해제 전까지만 마감 안내를 보냅니다.
+  return minutes >= 1 * 60 && minutes < 7 * 60;
 }
 
 async function checkDailyCloseNoticeOnce(options = {}) {
   if (dailyCloseNoticeCheckInProgress) return false;
+
+  // 관리자가 잠금을 눌러둔 상태에서는 휴장일/비상상황으로 보고
+  // 마감 안내도 자동 전송하지 않습니다.
+  if (!botEnabled) return false;
 
   const requestedTradeDate = String(
     options.tradeDate || ""
@@ -1735,12 +1670,6 @@ async function checkDailyCloseNoticeOnce(options = {}) {
   const isPreviousTradeDate =
     requestedTradeDate &&
     requestedTradeDate < getTodayLogDate();
-
-  // 관리자 잠금 상태이면 마감 안내도 보내지 않습니다.
-  // 토요일 01:00~07:00은 금요일 야간 세션의 마감 안내 시간으로 허용합니다.
-  if (!botEnabled) {
-    return false;
-  }
 
   if (!isDailyCloseNoticeTime() && !isPreviousTradeDate) {
     return false;
@@ -1761,13 +1690,31 @@ async function checkDailyCloseNoticeOnce(options = {}) {
     const tradeDate =
       requestedTradeDate || getTodayLogDate();
 
+    // 주말 매매일에는 차트가 멈춰 있어도 마감 안내를 전송하지 않습니다.
+    // 금요일 밤 23:00~토요일 01:00 포지션은 금요일 매매일로 보고 정상 마감 가능합니다.
+    if (isWeekendTradeDate(tradeDate)) {
+      return false;
+    }
+
     // 2차 진입·TP·SL·시장가 종료 메시지가 전송 완료되기 전에는
     // 마감 안내를 먼저 보내지 않습니다.
     if (await hasUnresolvedPositionTelegramEvents(tradeDate)) {
       return false;
     }
 
-    const sendResult = await sendDailyCloseNoticeForTradeDate(tradeDate);
+    const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
+
+    const sendResult = await sendTelegramEventToTargets({
+      eventKey,
+      tradeDate,
+      eventType: "DAILY_CLOSE",
+      method: "sendMessage",
+      body: {
+        text: DAILY_CLOSE_NOTICE_TEXT,
+        parse_mode: "HTML",
+      },
+      requirePrimarySent: false,
+    });
 
     if (sendResult.allSent) {
       console.log(`금일 마감 안내 전체 전달방 전송 완료: ${tradeDate}`);
@@ -1813,6 +1760,21 @@ const VANTAGE_MAX_STALE_SECONDS = Math.max(
   10,
   Number(process.env.VANTAGE_MAX_STALE_SECONDS || 60)
 );
+
+// MT5 가격은 0.5초 단위로 빠르게 들어올 수 있으므로,
+// 매매일지/미전송 기록은 보존하고 가격 tick 기록만 최근 1시간 기준으로 정리합니다.
+const PRICE_TICK_RETENTION_MINUTES = Math.max(
+  10,
+  Number(process.env.PRICE_TICK_RETENTION_MINUTES || 60)
+);
+
+const PRICE_TICK_CLEANUP_INTERVAL_MINUTES = Math.max(
+  1,
+  Number(process.env.PRICE_TICK_CLEANUP_INTERVAL_MINUTES || 5)
+);
+
+let lastPriceTickCleanupAt = 0;
+let isPriceTickCleanupRunning = false;
 
 let isCheckingTradeWatch = false;
 
@@ -2492,6 +2454,54 @@ function mapPriceTick(row) {
   };
 }
 
+async function cleanupOldXauUsdPriceTicks({ force = false } = {}) {
+  const now = Date.now();
+  const cleanupIntervalMs = PRICE_TICK_CLEANUP_INTERVAL_MINUTES * 60 * 1000;
+
+  // 500ms마다 들어오는 가격 tick마다 삭제 쿼리를 실행하지 않도록 주기를 제한합니다.
+  if (!force && now - lastPriceTickCleanupAt < cleanupIntervalMs) return;
+  if (isPriceTickCleanupRunning) return;
+
+  isPriceTickCleanupRunning = true;
+  lastPriceTickCleanupAt = now;
+
+  try {
+    const db = requireSupabase();
+    const cutoff = new Date(
+      now - PRICE_TICK_RETENTION_MINUTES * 60 * 1000
+    ).toISOString();
+
+    // 가격 수신이 잠시 끊겨도 화면/감시에 쓸 마지막 가격 1개는 남깁니다.
+    const { data: latestTick, error: latestError } = await db
+      .from("xauusd_price_ticks")
+      .select("id")
+      .eq("symbol", "XAUUSD")
+      .order("checked_at", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestError) throw latestError;
+
+    let deleteQuery = db
+      .from("xauusd_price_ticks")
+      .delete()
+      .eq("symbol", "XAUUSD")
+      .lt("checked_at", cutoff);
+
+    if (latestTick?.id !== undefined && latestTick?.id !== null) {
+      deleteQuery = deleteQuery.neq("id", latestTick.id);
+    }
+
+    const { error: deleteError } = await deleteQuery;
+    if (deleteError) throw deleteError;
+  } catch (error) {
+    console.error("가격 tick 기록 자동 정리 실패:", error.message);
+  } finally {
+    isPriceTickCleanupRunning = false;
+  }
+}
+
 async function saveXauUsdPriceTick(priceData, source = "manual") {
   try {
     const db = requireSupabase();
@@ -2512,12 +2522,9 @@ async function saveXauUsdPriceTick(priceData, source = "manual") {
 
     if (error) throw error;
 
-    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
-
-    await db
-      .from("xauusd_price_ticks")
-      .delete()
-      .lt("created_at", cutoff);
+    cleanupOldXauUsdPriceTicks().catch((cleanupError) => {
+      console.error("가격 tick 기록 자동 정리 예약 실패:", cleanupError.message);
+    });
 
     return data;
   } catch (error) {
@@ -2538,7 +2545,7 @@ function makeEntryReachMessage({ direction, round, entry, tp, sl }) {
   const roundLabel = `${round}회차`;
   const orderLabel =
     round === 2 ? "1회차 / 2회차" : "1회차 / 2회차 / 3회차";
-  const lot = "1랏";
+  const lot = round === 3 ? "2랏" : "1랏";
 
   return `${header}
  
@@ -2744,6 +2751,10 @@ app.post("/api/vantage-tick", async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    cleanupOldXauUsdPriceTicks().catch((cleanupError) => {
+      console.error("가격 tick 기록 자동 정리 예약 실패:", cleanupError.message);
+    });
 
     const mappedTick = mapPriceTick(data);
 
@@ -3026,7 +3037,7 @@ function getTpForWatchStage({ stage, firstTp, secondTp }) {
 }
 
 const AUTO_POSITION_LOTS = {
-  1: 1,
+  1: 2,
   2: 1,
 };
 
@@ -3450,8 +3461,9 @@ async function checkTradeWatchOnce(options = {}) {
 
     if (error) throw error;
     if (!watch) return;
-    if (!botEnabled) return;
 
+    // 중요: botEnabled/관리자 잠금은 신규 신호와 마감 멘트만 막습니다.
+    // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 01:00 이후나 잠금 상태에서도 계속 유지해야 합니다.
     const priceData = options.priceData || (await fetchXauUsdPrice());
 
     if (!options.priceData && PRICE_PROVIDER !== "vantage_mt5") {
@@ -3789,61 +3801,6 @@ app.post("/api/manual-off", async (req, res) => {
       activeSignal,
       sentSignals,
       blockedSignals,
-    });
-  } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
-  }
-});
-
-app.post("/api/operating-lock", async (req, res) => {
-  try {
-    await syncSignalLogsFromDb();
-
-    const tradeDate = activeSignal?.logDate || getTodayLogDate();
-    let closeNoticeSent = false;
-    let closeNoticeSkippedReason = "";
-    let closeNoticeResult = null;
-
-    if (shouldBlockManualCloseNoticeOnWeekend()) {
-      closeNoticeSkippedReason =
-        "토요일/일요일은 운영일이 아니므로 마감멘트를 보내지 않고 잠금만 처리했습니다.";
-    } else {
-      closeNoticeResult = await sendDailyCloseNoticeForTradeDate(tradeDate);
-      closeNoticeSent = Boolean(
-        closeNoticeResult?.allSent || closeNoticeResult?.primary?.status === "sent"
-      );
-
-      if (!closeNoticeSent && closeNoticeResult?.hasNeedsCheck) {
-        closeNoticeSkippedReason =
-          "마감멘트 전송 여부 확인이 필요합니다. 중복 방지를 위해 이벤트 상태를 확인해주세요.";
-      }
-    }
-
-    // 운영잠금은 신규 신호만 차단합니다.
-    // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 끊지 않습니다.
-    botEnabled = false;
-
-    await syncSignalLogsFromDb();
-
-    res.json({
-      ok: true,
-      message: closeNoticeSent
-        ? "마감멘트 발송 후 운영잠금 상태로 전환했습니다. 진행 중 포지션 감시는 유지됩니다."
-        : closeNoticeSkippedReason ||
-          "운영잠금 상태로 전환했습니다. 진행 중 포지션 감시는 유지됩니다.",
-      botEnabled,
-      signalRunning,
-      canReceiveSignal: false,
-      activeSignal,
-      sentSignals,
-      blockedSignals,
-      tradeDate,
-      closeNoticeSent,
-      closeNoticeSkippedReason,
-      closeNoticeResult,
     });
   } catch (error) {
     res.status(500).json({
