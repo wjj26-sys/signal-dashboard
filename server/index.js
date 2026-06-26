@@ -162,8 +162,7 @@ function getAutoScheduleState() {
     이미 진행 중인 포지션의 2차 진입/TP/SL 감시는
     이 시간표와 별개로 포지션 종료 시까지 계속 작동합니다.
   */
-  const isMondayNight =
-    day === 1 && minutes >= 23 * 60;
+  const isMondayNight = day === 1 && minutes >= 23 * 60;
 
   const isTuesdayToFridayMorning =
     day >= 2 &&
@@ -1696,128 +1695,12 @@ async function sendTextMessageToTarget(text) {
   return sendMessageToAllTargets({ text });
 }
 
-function getPreviousDateText(date) {
-  const previous = new Date(date);
-  previous.setDate(previous.getDate() - 1);
-  return toDateText(previous);
-}
-
-function getCloseNoticeState(options = {}) {
+function isDailyCloseNoticeTime() {
   const now = getKstNow();
-  const day = now.getDay(); // 0=일, 1=월, ... 6=토
   const minutes = now.getHours() * 60 + now.getMinutes();
-  const requestedTradeDate = String(options.tradeDate || "").trim();
-  const force = Boolean(options.force);
 
-  /*
-    마감 안내 기준(KST)
-
-    자동 마감:
-    - 화요일~금요일 01:00~07:00: 전날 야간 세션 마감
-    - 화요일~금요일 09:00~23:00: 당일 오전 세션 마감
-    - 토요일·일요일: 자동 마감 멘트 전송 금지
-
-    운영잠금:
-    - 관리자가 직접 누르면 현재 세션 기준으로 마감 멘트를 즉시 1회 보낸 뒤 잠급니다.
-    - 같은 tradeDate + closeSlot 이벤트 키를 사용해 자동 마감과 중복 전송을 막습니다.
-  */
-  if (day === 0 || day === 6) {
-    return {
-      canSend: false,
-      tradeDate: requestedTradeDate || getTodayLogDate(),
-      closeSlot: "",
-      reason: "주말 마감 멘트 전송 금지",
-    };
-  }
-
-  const isNightCloseWindow =
-    day >= 2 &&
-    day <= 5 &&
-    minutes >= 1 * 60 &&
-    minutes < 7 * 60;
-
-  const isMorningCloseWindow =
-    day >= 2 &&
-    day <= 5 &&
-    minutes >= 9 * 60 &&
-    minutes < 23 * 60;
-
-  if (isNightCloseWindow) {
-    return {
-      canSend: true,
-      tradeDate: requestedTradeDate || getPreviousDateText(now),
-      closeSlot: "NIGHT",
-      reason: "",
-    };
-  }
-
-  if (isMorningCloseWindow) {
-    return {
-      canSend: true,
-      tradeDate: requestedTradeDate || getCalendarDate(),
-      closeSlot: "MORNING",
-      reason: "",
-    };
-  }
-
-  if (force) {
-    const isNightSession =
-      (day === 1 && minutes >= 23 * 60) ||
-      (day >= 2 && day <= 5 && (minutes < 1 * 60 || minutes >= 23 * 60));
-
-    const isMorningSession =
-      day >= 2 &&
-      day <= 5 &&
-      minutes >= 7 * 60 &&
-      minutes < 23 * 60;
-
-    if (isNightSession) {
-      return {
-        canSend: true,
-        tradeDate:
-          requestedTradeDate ||
-          (minutes < 1 * 60 ? getPreviousDateText(now) : getCalendarDate()),
-        closeSlot: "NIGHT",
-        reason: "",
-      };
-    }
-
-    if (isMorningSession) {
-      return {
-        canSend: true,
-        tradeDate: requestedTradeDate || getCalendarDate(),
-        closeSlot: "MORNING",
-        reason: "",
-      };
-    }
-
-    return {
-      canSend: true,
-      tradeDate: requestedTradeDate || getTodayLogDate(),
-      closeSlot: "MANUAL",
-      reason: "",
-    };
-  }
-
-  if (requestedTradeDate && requestedTradeDate < getTodayLogDate()) {
-    return {
-      canSend: true,
-      tradeDate: requestedTradeDate,
-      closeSlot: "POSITION_FINISH",
-      reason: "",
-    };
-  }
-
-  return {
-    canSend: false,
-    tradeDate: requestedTradeDate || getTodayLogDate(),
-    closeSlot: "",
-    reason: "마감 멘트 전송 시간이 아닙니다.",
-  };
-}
-
-function isDailyCloseNoticeTime(options = {}) {
-  return getCloseNoticeState(options).canSend;
+  // 새벽 1시부터 오전 7시 잠금 해제 전까지만 마감 안내를 보냅니다.
+  return minutes >= 1 * 60 && minutes < 7 * 60;
 }
 
 async function checkDailyCloseNoticeOnce(options = {}) {
@@ -1827,9 +1710,19 @@ async function checkDailyCloseNoticeOnce(options = {}) {
   // 마감 안내도 자동 전송하지 않습니다.
   if (!botEnabled) return false;
 
-  const closeState = getCloseNoticeState(options);
+  // 토요일·일요일에는 실제 요일 기준으로도 마감 안내를 전송하지 않습니다.
+  const currentKstDay = getKstNow().getDay();
+  if (currentKstDay === 0 || currentKstDay === 6) return false;
 
-  if (!closeState.canSend) {
+  const requestedTradeDate = String(
+    options.tradeDate || ""
+  ).trim();
+
+  const isPreviousTradeDate =
+    requestedTradeDate &&
+    requestedTradeDate < getTodayLogDate();
+
+  if (!isDailyCloseNoticeTime() && !isPreviousTradeDate) {
     return false;
   }
 
@@ -1838,15 +1731,18 @@ async function checkDailyCloseNoticeOnce(options = {}) {
   try {
     await syncSignalLogsFromDb();
 
-    // 마감 직전에 접수된 신호가 저장 중이거나 진행 중이면 마감 안내를 기다립니다.
+    // 1시 직전에 접수된 신호가 저장 중이거나 진행 중이면 마감 안내를 기다립니다.
     if (signalForwardInProgress || signalRunning || activeSignal) {
       return false;
     }
 
-    const tradeDate = closeState.tradeDate;
-    const closeSlot = closeState.closeSlot || "GENERAL";
+    // 오전 7시 이전에는 전날 매매일을 사용합니다.
+    // 포지션이 오전 7시 이후 끝난 경우에는 해당 포지션의 기존 매매일을 유지합니다.
+    const tradeDate =
+      requestedTradeDate || getTodayLogDate();
 
-    // 주말 매매일에는 마감 안내를 전송하지 않습니다.
+    // 주말 매매일에는 차트가 멈춰 있어도 마감 안내를 전송하지 않습니다.
+    // 금요일 밤 23:00~토요일 01:00 포지션은 금요일 매매일로 보고 정상 마감 가능합니다.
     if (isWeekendTradeDate(tradeDate)) {
       return false;
     }
@@ -1857,7 +1753,7 @@ async function checkDailyCloseNoticeOnce(options = {}) {
       return false;
     }
 
-    const eventKey = `TRADE_DATE:${tradeDate}:${closeSlot}:DAILY_CLOSE`;
+    const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
 
     const sendResult = await sendTelegramEventToTargets({
       eventKey,
@@ -3908,19 +3804,16 @@ app.post("/api/operating-lock", async (req, res) => {
   try {
     await syncSignalLogsFromDb();
 
-    const closeState = getCloseNoticeState({
-      tradeDate: req.body?.tradeDate,
-      force: true,
-    });
+    const currentKstDay = getKstNow().getDay();
 
-    if (!closeState.canSend) {
+    // 토요일·일요일에는 운영잠금도 마감멘트를 보내지 않고 잠금만 적용합니다.
+    if (currentKstDay === 0 || currentKstDay === 6) {
       botEnabled = false;
 
       return res.json({
         ok: true,
         message:
-          closeState.reason ||
-          "운영잠금 상태로 전환했습니다. 마감멘트는 전송하지 않았습니다.",
+          "주말이라 마감멘트는 전송하지 않고 운영잠금 상태로 전환했습니다.",
         botEnabled,
         signalRunning,
         canReceiveSignal: false,
@@ -3931,9 +3824,8 @@ app.post("/api/operating-lock", async (req, res) => {
       });
     }
 
-    const tradeDate = closeState.tradeDate;
-    const closeSlot = closeState.closeSlot || "MANUAL";
-    const eventKey = `TRADE_DATE:${tradeDate}:${closeSlot}:DAILY_CLOSE`;
+    const tradeDate = String(req.body?.tradeDate || getTodayLogDate()).trim();
+    const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
 
     const sendResult = await sendTelegramEventToTargets({
       eventKey,
@@ -4809,14 +4701,14 @@ setInterval(() => {
   });
 }, 15 * 1000);
 
-// 각 운영 종료 시각 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
+// 새벽 1시 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
 setInterval(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
     console.error("금일 마감 안내 확인 실패:", error.message);
   });
 }, 10 * 1000);
 
-// 서버가 마감 안내 확인 구간에 재시작되어도 미전송된 마감 안내를 확인합니다.
+// 서버가 새벽 잠금 시간에 재시작되어도 미전송된 마감 안내를 확인합니다.
 setTimeout(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
     console.error("서버 시작 후 마감 안내 확인 실패:", error.message);
