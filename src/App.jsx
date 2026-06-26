@@ -183,10 +183,10 @@ function calculateTp({ direction, baseEntry, entry2, tpGap }) {
       ? base + sign * gap
       : null;
 
-  // 2차 평균가 = 1차 1랏 + 2차 1랏
+  // 2차 평균가 = 1차 2랏 + 2차 1랏
   const secondAverage =
     Number.isFinite(base) && Number.isFinite(e2)
-      ? (base + e2) / 2
+      ? (base * 2 + e2) / 3
       : null;
 
   // 2차 TP = 2차 평균가 ± TP 간격
@@ -205,7 +205,7 @@ function calculateTp({ direction, baseEntry, entry2, tpGap }) {
 const XAUUSD_VALUE_PER_LOT = 100;
 
 const POSITION_LOTS = {
-  1: 1,
+  1: 2,
   2: 1,
 };
 
@@ -1529,7 +1529,12 @@ const calcText = useMemo(() => {
 
               <div>
                 <span>운영 상태</span>
-                <strong>{serverStatus?.operatingTime ? "상시 운영" : "운영 외"}</strong>
+                <strong>
+                  {serverStatus?.scheduleStatus ||
+                    (serverStatus?.operatingTime
+                      ? "자동 운영 시간"
+                      : "자동 잠금 시간")}
+                </strong>
               </div>
 
               <div>
@@ -1778,7 +1783,7 @@ const calcText = useMemo(() => {
 
             <p className="muted-note">
               계산식: 1차 TP는 1차 진입가에 TP 간격을 적용하고, 2차 TP는
-              1차 1랏과 2차 1랏의 평균가에 TP 간격을 적용합니다.
+              1차 2랏과 2차 1랏의 평균가에 TP 간격을 적용합니다.
             </p>
           </div>
 

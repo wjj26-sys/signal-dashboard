@@ -53,8 +53,14 @@ let dailyCloseNoticeCheckInProgress = false;
 let signalForwardInProgress = false;
 
 const DAILY_CLOSE_NOTICE_MARKER_SYMBOL = "__DAILY_CLOSE_NOTICE__";
-const DAILY_CLOSE_NOTICE_TEXT = `&lt; 운영시간 안내 &gt;
-<blockquote>✔️오전 9:00~ 01:00(익일 새벽 1시) 운영</blockquote>
+const DAILY_CLOSE_NOTICE_TEXT = `# BW # Quant AI 시그널
+&lt; 운영시간 안내 &gt;
+<blockquote>✅ 월요일
+∨ 23:00 ~ 01:00(익일 새벽 1시) 운영
+
+✅ 화요일 ~ 금요일
+∨ 07:00 ~ 09:00 운영
+∨ 23:00 ~ 01:00(익일 새벽 1시) 운영</blockquote>
 
 금일 매매 여기까지 진행하도록 하겠습니다.
 
@@ -140,25 +146,61 @@ function getWeekKey(dateText) {
 
 function getAutoScheduleState() {
   const now = getKstNow();
-  const hour = now.getHours();
-  const minute = now.getMinutes();
+  const day = now.getDay(); // 0=일, 1=월, ... 6=토
+  const minutes = now.getHours() * 60 + now.getMinutes();
 
-  const minutes = hour * 60 + minute;
+  /*
+    신규 신호 수신 시간(KST)
 
-  // 신규 신호 수신 시간(KST)
-  // 23:00 ~ 01:00만 자동 수신 가능합니다.
-  // 01:00 ~ 23:00에는 신규 신호를 자동 전송하지 않습니다.
-  // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 이 시간표와 별개로 계속 작동합니다.
-  const openStart = 23 * 60;
-  const openEnd = 1 * 60;
+    - 월요일 오전 운영 없음
+    - 월요일 23:00 ~ 화요일 01:00
+    - 화요일 ~ 금요일 07:00 ~ 09:00
+    - 화요일 ~ 금요일 23:00 ~ 익일 01:00
+    - 토요일·일요일 신규 신호 잠금
 
-  const isOpen = minutes >= openStart || minutes < openEnd;
+    금요일 23:00 ~ 토요일 01:00은 금요일 야간 세션으로 봅니다.
+    이미 진행 중인 포지션의 2차 진입/TP/SL 감시는
+    이 시간표와 별개로 포지션 종료 시까지 계속 작동합니다.
+  */
+  const isMondayNight =
+    day === 1 && minutes >= 23 * 60;
+
+  const isTuesdayToFridayMorning =
+    day >= 2 &&
+    day <= 5 &&
+    minutes >= 7 * 60 &&
+    minutes < 9 * 60;
+
+  const isTuesdayToFridayNight =
+    day >= 2 &&
+    day <= 5 &&
+    minutes >= 23 * 60;
+
+  const isNightContinuation =
+    ((day >= 2 && day <= 5) || day === 6) &&
+    minutes < 1 * 60;
+
+  const isOpen =
+    isMondayNight ||
+    isTuesdayToFridayMorning ||
+    isTuesdayToFridayNight ||
+    isNightContinuation;
 
   if (isOpen) {
     return {
       isOpen: true,
-      statusText: "자동 운영 시간",
+      statusText: isTuesdayToFridayMorning
+        ? "평일 오전 운영 시간"
+        : "야간 운영 시간",
       reason: "",
+    };
+  }
+
+  if (day === 0 || day === 6) {
+    return {
+      isOpen: false,
+      statusText: "주말 운영 잠금",
+      reason: "주말 운영 잠금으로 미전송",
     };
   }
 
@@ -359,14 +401,20 @@ function isSignalMessage(message) {
   return hasSignalImage(message) || hasTradeSetupText(message);
 }
 
-function getSourceRoom(sourceChatId) {
-  const chatId = String(sourceChatId);
+function normalizeChatId(value) {
+  return String(value ?? "").trim();
+}
 
-  if (SOURCE_CHAT_ID && chatId === String(SOURCE_CHAT_ID)) {
+function getSourceRoom(sourceChatId) {
+  const chatId = normalizeChatId(sourceChatId);
+  const sourceChatId1 = normalizeChatId(SOURCE_CHAT_ID);
+  const sourceChatId2 = normalizeChatId(SOURCE_CHAT_ID_2);
+
+  if (sourceChatId1 && chatId === sourceChatId1) {
     return "1번방";
   }
 
-  if (SOURCE_CHAT_ID_2 && chatId === String(SOURCE_CHAT_ID_2)) {
+  if (sourceChatId2 && chatId === sourceChatId2) {
     return "2번방";
   }
 
@@ -1648,12 +1696,128 @@ async function sendTextMessageToTarget(text) {
   return sendMessageToAllTargets({ text });
 }
 
-function isDailyCloseNoticeTime() {
-  const now = getKstNow();
-  const minutes = now.getHours() * 60 + now.getMinutes();
+function getPreviousDateText(date) {
+  const previous = new Date(date);
+  previous.setDate(previous.getDate() - 1);
+  return toDateText(previous);
+}
 
-  // 새벽 1시부터 오전 7시 잠금 해제 전까지만 마감 안내를 보냅니다.
-  return minutes >= 1 * 60 && minutes < 7 * 60;
+function getCloseNoticeState(options = {}) {
+  const now = getKstNow();
+  const day = now.getDay(); // 0=일, 1=월, ... 6=토
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  const requestedTradeDate = String(options.tradeDate || "").trim();
+  const force = Boolean(options.force);
+
+  /*
+    마감 안내 기준(KST)
+
+    자동 마감:
+    - 화요일~금요일 01:00~07:00: 전날 야간 세션 마감
+    - 화요일~금요일 09:00~23:00: 당일 오전 세션 마감
+    - 토요일·일요일: 자동 마감 멘트 전송 금지
+
+    운영잠금:
+    - 관리자가 직접 누르면 현재 세션 기준으로 마감 멘트를 즉시 1회 보낸 뒤 잠급니다.
+    - 같은 tradeDate + closeSlot 이벤트 키를 사용해 자동 마감과 중복 전송을 막습니다.
+  */
+  if (day === 0 || day === 6) {
+    return {
+      canSend: false,
+      tradeDate: requestedTradeDate || getTodayLogDate(),
+      closeSlot: "",
+      reason: "주말 마감 멘트 전송 금지",
+    };
+  }
+
+  const isNightCloseWindow =
+    day >= 2 &&
+    day <= 5 &&
+    minutes >= 1 * 60 &&
+    minutes < 7 * 60;
+
+  const isMorningCloseWindow =
+    day >= 2 &&
+    day <= 5 &&
+    minutes >= 9 * 60 &&
+    minutes < 23 * 60;
+
+  if (isNightCloseWindow) {
+    return {
+      canSend: true,
+      tradeDate: requestedTradeDate || getPreviousDateText(now),
+      closeSlot: "NIGHT",
+      reason: "",
+    };
+  }
+
+  if (isMorningCloseWindow) {
+    return {
+      canSend: true,
+      tradeDate: requestedTradeDate || getCalendarDate(),
+      closeSlot: "MORNING",
+      reason: "",
+    };
+  }
+
+  if (force) {
+    const isNightSession =
+      (day === 1 && minutes >= 23 * 60) ||
+      (day >= 2 && day <= 5 && (minutes < 1 * 60 || minutes >= 23 * 60));
+
+    const isMorningSession =
+      day >= 2 &&
+      day <= 5 &&
+      minutes >= 7 * 60 &&
+      minutes < 23 * 60;
+
+    if (isNightSession) {
+      return {
+        canSend: true,
+        tradeDate:
+          requestedTradeDate ||
+          (minutes < 1 * 60 ? getPreviousDateText(now) : getCalendarDate()),
+        closeSlot: "NIGHT",
+        reason: "",
+      };
+    }
+
+    if (isMorningSession) {
+      return {
+        canSend: true,
+        tradeDate: requestedTradeDate || getCalendarDate(),
+        closeSlot: "MORNING",
+        reason: "",
+      };
+    }
+
+    return {
+      canSend: true,
+      tradeDate: requestedTradeDate || getTodayLogDate(),
+      closeSlot: "MANUAL",
+      reason: "",
+    };
+  }
+
+  if (requestedTradeDate && requestedTradeDate < getTodayLogDate()) {
+    return {
+      canSend: true,
+      tradeDate: requestedTradeDate,
+      closeSlot: "POSITION_FINISH",
+      reason: "",
+    };
+  }
+
+  return {
+    canSend: false,
+    tradeDate: requestedTradeDate || getTodayLogDate(),
+    closeSlot: "",
+    reason: "마감 멘트 전송 시간이 아닙니다.",
+  };
+}
+
+function isDailyCloseNoticeTime(options = {}) {
+  return getCloseNoticeState(options).canSend;
 }
 
 async function checkDailyCloseNoticeOnce(options = {}) {
@@ -1663,15 +1827,9 @@ async function checkDailyCloseNoticeOnce(options = {}) {
   // 마감 안내도 자동 전송하지 않습니다.
   if (!botEnabled) return false;
 
-  const requestedTradeDate = String(
-    options.tradeDate || ""
-  ).trim();
+  const closeState = getCloseNoticeState(options);
 
-  const isPreviousTradeDate =
-    requestedTradeDate &&
-    requestedTradeDate < getTodayLogDate();
-
-  if (!isDailyCloseNoticeTime() && !isPreviousTradeDate) {
+  if (!closeState.canSend) {
     return false;
   }
 
@@ -1680,18 +1838,15 @@ async function checkDailyCloseNoticeOnce(options = {}) {
   try {
     await syncSignalLogsFromDb();
 
-    // 1시 직전에 접수된 신호가 저장 중이거나 진행 중이면 마감 안내를 기다립니다.
+    // 마감 직전에 접수된 신호가 저장 중이거나 진행 중이면 마감 안내를 기다립니다.
     if (signalForwardInProgress || signalRunning || activeSignal) {
       return false;
     }
 
-    // 오전 7시 이전에는 전날 매매일을 사용합니다.
-    // 포지션이 오전 7시 이후 끝난 경우에는 해당 포지션의 기존 매매일을 유지합니다.
-    const tradeDate =
-      requestedTradeDate || getTodayLogDate();
+    const tradeDate = closeState.tradeDate;
+    const closeSlot = closeState.closeSlot || "GENERAL";
 
-    // 주말 매매일에는 차트가 멈춰 있어도 마감 안내를 전송하지 않습니다.
-    // 금요일 밤 23:00~토요일 01:00 포지션은 금요일 매매일로 보고 정상 마감 가능합니다.
+    // 주말 매매일에는 마감 안내를 전송하지 않습니다.
     if (isWeekendTradeDate(tradeDate)) {
       return false;
     }
@@ -1702,7 +1857,7 @@ async function checkDailyCloseNoticeOnce(options = {}) {
       return false;
     }
 
-    const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
+    const eventKey = `TRADE_DATE:${tradeDate}:${closeSlot}:DAILY_CLOSE`;
 
     const sendResult = await sendTelegramEventToTargets({
       eventKey,
@@ -1908,7 +2063,7 @@ async function addBlockedSignal(message, reason, sourceRoom) {
 }
 
 async function handleSignalMessage(message) {
-  const sourceChatId = String(message.chat.id);
+  const sourceChatId = normalizeChatId(message.chat.id);
   const sourceRoom = getSourceRoom(sourceChatId);
 
   if (!sourceRoom) {
@@ -3748,6 +3903,87 @@ app.get("/api/status", async (req, res) => {
   }
 });
 
+
+app.post("/api/operating-lock", async (req, res) => {
+  try {
+    await syncSignalLogsFromDb();
+
+    const closeState = getCloseNoticeState({
+      tradeDate: req.body?.tradeDate,
+      force: true,
+    });
+
+    if (!closeState.canSend) {
+      botEnabled = false;
+
+      return res.json({
+        ok: true,
+        message:
+          closeState.reason ||
+          "운영잠금 상태로 전환했습니다. 마감멘트는 전송하지 않았습니다.",
+        botEnabled,
+        signalRunning,
+        canReceiveSignal: false,
+        activeSignal,
+        sentSignals,
+        blockedSignals,
+        closeNoticeSent: false,
+      });
+    }
+
+    const tradeDate = closeState.tradeDate;
+    const closeSlot = closeState.closeSlot || "MANUAL";
+    const eventKey = `TRADE_DATE:${tradeDate}:${closeSlot}:DAILY_CLOSE`;
+
+    const sendResult = await sendTelegramEventToTargets({
+      eventKey,
+      tradeDate,
+      eventType: "DAILY_CLOSE",
+      method: "sendMessage",
+      body: {
+        text: DAILY_CLOSE_NOTICE_TEXT,
+        parse_mode: "HTML",
+      },
+      requirePrimarySent: false,
+    });
+
+    botEnabled = false;
+
+    res.json({
+      ok: true,
+      message: sendResult.allSent
+        ? "마감멘트를 전송하고 운영잠금 상태로 전환했습니다."
+        : sendResult.hasNeedsCheck
+        ? "마감멘트 전송 여부 확인이 필요하지만 운영잠금 상태로 전환했습니다."
+        : "마감멘트 전송 대기/실패가 있지만 운영잠금 상태로 전환했습니다.",
+      botEnabled,
+      signalRunning,
+      canReceiveSignal: false,
+      activeSignal,
+      sentSignals,
+      blockedSignals,
+      closeNoticeSent: sendResult.allSent,
+      closeNoticeEventKey: eventKey,
+      closeNoticeDeliveries: sendResult.deliveries,
+    });
+  } catch (error) {
+    botEnabled = false;
+
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      message:
+        "운영잠금 처리 중 오류가 발생했습니다. 안전을 위해 신규 신호는 잠금 처리했습니다.",
+      botEnabled,
+      signalRunning,
+      canReceiveSignal: false,
+      activeSignal,
+      sentSignals,
+      blockedSignals,
+    });
+  }
+});
+
 app.post("/api/manual-on", async (req, res) => {
   try {
     await syncSignalLogsFromDb();
@@ -4440,7 +4676,12 @@ app.get("/api/set-webhook", async (req, res) => {
 
     const result = await telegramApi("setWebhook", {
       url: webhookUrl,
-      allowed_updates: ["message", "channel_post"],
+      allowed_updates: [
+        "message",
+        "channel_post",
+        "edited_message",
+        "edited_channel_post",
+      ],
     });
 
     res.json({
@@ -4534,6 +4775,16 @@ app.post("/telegram/webhook", async (req, res) => {
       await handleSignalMessage(update.channel_post);
     }
 
+    // 일부 원본방은 게시 후 내용을 수정하는 방식으로 신호를 완성합니다.
+    // 최초 게시가 이미 처리된 신호라면 기존 중복 방지 로직이 다시 전송하지 않습니다.
+    if (update.edited_message) {
+      await handleSignalMessage(update.edited_message);
+    }
+
+    if (update.edited_channel_post) {
+      await handleSignalMessage(update.edited_channel_post);
+    }
+
     res.sendStatus(200);
   } catch (error) {
     console.error("Webhook Error:", error.message);
@@ -4558,14 +4809,14 @@ setInterval(() => {
   });
 }, 15 * 1000);
 
-// 새벽 1시 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
+// 각 운영 종료 시각 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
 setInterval(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
     console.error("금일 마감 안내 확인 실패:", error.message);
   });
 }, 10 * 1000);
 
-// 서버가 새벽 잠금 시간에 재시작되어도 미전송된 마감 안내를 확인합니다.
+// 서버가 마감 안내 확인 구간에 재시작되어도 미전송된 마감 안내를 확인합니다.
 setTimeout(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
     console.error("서버 시작 후 마감 안내 확인 실패:", error.message);
