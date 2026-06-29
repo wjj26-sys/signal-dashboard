@@ -1710,10 +1710,8 @@ async function checkDailyCloseNoticeOnce(options = {}) {
   // 마감 안내도 자동 전송하지 않습니다.
   if (!botEnabled) return false;
 
-  // 토요일·일요일에는 실제 요일 기준으로도 마감 안내를 전송하지 않습니다.
-  const currentKstDay = getKstNow().getDay();
-  if (currentKstDay === 0 || currentKstDay === 6) return false;
-
+  // 마감 안내는 실제 요일이 아니라 매매기록 날짜(tradeDate) 기준으로 판단합니다.
+  // 예: 금요일 야간 매매가 토요일 새벽에 종료되어도 tradeDate가 금요일이면 전송합니다.
   const requestedTradeDate = String(
     options.tradeDate || ""
   ).trim();
@@ -3804,16 +3802,17 @@ app.post("/api/operating-lock", async (req, res) => {
   try {
     await syncSignalLogsFromDb();
 
-    const currentKstDay = getKstNow().getDay();
+    const tradeDate = String(req.body?.tradeDate || getTodayLogDate()).trim();
 
-    // 토요일·일요일에는 운영잠금도 마감멘트를 보내지 않고 잠금만 적용합니다.
-    if (currentKstDay === 0 || currentKstDay === 6) {
+    // 운영잠금도 실제 요일이 아니라 매매기록 날짜(tradeDate) 기준으로 판단합니다.
+    // 예: 금요일 야간 매매가 토요일 새벽에 조기 종료되면 tradeDate가 금요일이므로 전송합니다.
+    if (isWeekendTradeDate(tradeDate)) {
       botEnabled = false;
 
       return res.json({
         ok: true,
         message:
-          "주말이라 마감멘트는 전송하지 않고 운영잠금 상태로 전환했습니다.",
+          "매매일이 주말이라 마감멘트는 전송하지 않고 운영잠금 상태로 전환했습니다.",
         botEnabled,
         signalRunning,
         canReceiveSignal: false,
@@ -3824,7 +3823,6 @@ app.post("/api/operating-lock", async (req, res) => {
       });
     }
 
-    const tradeDate = String(req.body?.tradeDate || getTodayLogDate()).trim();
     const eventKey = `TRADE_DATE:${tradeDate}:DAILY_CLOSE`;
 
     const sendResult = await sendTelegramEventToTargets({
