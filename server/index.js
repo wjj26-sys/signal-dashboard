@@ -56,11 +56,10 @@ const DAILY_CLOSE_NOTICE_MARKER_SYMBOL = "__DAILY_CLOSE_NOTICE__";
 const DAILY_CLOSE_NOTICE_TEXT = `# BW # Quant AI 시그널
 &lt; 운영시간 안내 &gt;
 <blockquote>✅ 월요일
-∨ 23:00 ~ 01:00(익일 새벽 1시) 운영
+∨ 9:00 ~ 01:00(익일 새벽 1시) 운영
 
 ✅ 화요일 ~ 금요일
-∨ 07:00 ~ 09:00 운영
-∨ 23:00 ~ 01:00(익일 새벽 1시) 운영</blockquote>
+∨ 7:00 ~ 01:00(익일 새벽 1시) 운영 운영</blockquote>
 
 금일 매매 여기까지 진행하도록 하겠습니다.
 
@@ -152,9 +151,11 @@ function getAutoScheduleState() {
   /*
     신규 신호 수신 시간(KST)
 
-    - 월요일 오전 운영 없음
+    - 월요일 09:00 ~ 22:00
+    - 월요일 22:00 ~ 23:00 신규 신호 잠금
     - 월요일 23:00 ~ 화요일 01:00
-    - 화요일 ~ 금요일 07:00 ~ 09:00
+    - 화요일 ~ 금요일 07:00 ~ 22:00
+    - 화요일 ~ 금요일 22:00 ~ 23:00 신규 신호 잠금
     - 화요일 ~ 금요일 23:00 ~ 익일 01:00
     - 토요일·일요일 신규 신호 잠금
 
@@ -162,13 +163,18 @@ function getAutoScheduleState() {
     이미 진행 중인 포지션의 2차 진입/TP/SL 감시는
     이 시간표와 별개로 포지션 종료 시까지 계속 작동합니다.
   */
-  const isMondayNight = day === 1 && minutes >= 23 * 60;
+  const isMondayDay =
+    day === 1 &&
+    minutes >= 9 * 60 &&
+    minutes < 22 * 60;
 
-  const isTuesdayToFridayMorning =
+  const isTuesdayToFridayDay =
     day >= 2 &&
     day <= 5 &&
     minutes >= 7 * 60 &&
-    minutes < 9 * 60;
+    minutes < 22 * 60;
+
+  const isMondayNight = day === 1 && minutes >= 23 * 60;
 
   const isTuesdayToFridayNight =
     day >= 2 &&
@@ -179,19 +185,35 @@ function getAutoScheduleState() {
     ((day >= 2 && day <= 5) || day === 6) &&
     minutes < 1 * 60;
 
+  const isNasdaqOpenLock =
+    day >= 1 &&
+    day <= 5 &&
+    minutes >= 22 * 60 &&
+    minutes < 23 * 60;
+
   const isOpen =
+    isMondayDay ||
+    isTuesdayToFridayDay ||
     isMondayNight ||
-    isTuesdayToFridayMorning ||
     isTuesdayToFridayNight ||
     isNightContinuation;
 
   if (isOpen) {
     return {
       isOpen: true,
-      statusText: isTuesdayToFridayMorning
-        ? "평일 오전 운영 시간"
-        : "야간 운영 시간",
+      statusText:
+        isMondayDay || isTuesdayToFridayDay
+          ? "주간 운영 시간"
+          : "야간 운영 시간",
       reason: "",
+    };
+  }
+
+  if (isNasdaqOpenLock) {
+    return {
+      isOpen: false,
+      statusText: "나스닥 장 시작 시간 잠금",
+      reason: "나스닥 장 시작 시간 잠금으로 미전송",
     };
   }
 
