@@ -205,7 +205,7 @@ function calculateTp({ direction, baseEntry, entry2, tpGap }) {
 const XAUUSD_VALUE_PER_LOT = 100;
 
 const POSITION_LOTS = {
-  1: 2,
+  1: 1,
   2: 1,
 };
 
