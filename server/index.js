@@ -75,6 +75,9 @@ const TELEGRAM_EVENT_RETRY_TYPES = [
   "DAILY_CLOSE",
 ];
 const telegramEventMemory = new Map();
+const TELEGRAM_EVENT_CLEANUP_RETENTION_DAYS = 14;
+const TELEGRAM_EVENT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let telegramEventCleanupInProgress = false;
 
 let sentSignals = [];
 let blockedSignals = [];
@@ -1655,11 +1658,56 @@ async function retryFailedTelegramEvents() {
   }
 }
 
+async function cleanupOldResolvedTelegramEvents() {
+  if (telegramEventCleanupInProgress) return;
+
+  const cutoff = new Date(
+    Date.now() -
+      TELEGRAM_EVENT_CLEANUP_RETENTION_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
+
+  telegramEventCleanupInProgress = true;
+
+  try {
+    if (!supabase) {
+      for (const [eventKey, event] of telegramEventMemory.entries()) {
+        const status = String(event?.status || "");
+        const resolvedAt = new Date(
+          event?.updated_at || event?.sent_at || event?.created_at || 0
+        ).getTime();
+
+        if (
+          ["sent", "cancelled"].includes(status) &&
+          Number.isFinite(resolvedAt) &&
+          resolvedAt < new Date(cutoff).getTime()
+        ) {
+          telegramEventMemory.delete(eventKey);
+        }
+      }
+
+      return;
+    }
+
+    // sent / cancelled 상태로 확정된 오래된 이벤트만 정리합니다.
+    // needs_check는 원인 추적과 중복 방지를 위해 자동 삭제하지 않습니다.
+    const { error } = await supabase
+      .from("telegram_events")
+      .delete()
+      .in("status", ["sent", "cancelled"])
+      .lt("updated_at", cutoff);
+
+    if (error) throw error;
+  } finally {
+    telegramEventCleanupInProgress = false;
+  }
+}
+
 
 async function hasUnresolvedPositionTelegramEvents(tradeDate) {
+  // 마감멘트는 포지션 정리 관련 메시지만 기다립니다.
+  // NEW_SIGNAL / NEW_SIGNAL_COPY needs_check는 중복방지 기록으로 남기되,
+  // 포지션이 종료된 뒤 마감멘트까지 막지는 않습니다.
   const protectedTypes = [
-    "NEW_SIGNAL",
-    "NEW_SIGNAL_COPY",
     "ENTRY2",
     "TP",
     "SL",
@@ -4721,6 +4769,12 @@ setInterval(() => {
   });
 }, 15 * 1000);
 
+setInterval(() => {
+  cleanupOldResolvedTelegramEvents().catch((error) => {
+    console.error("완료된 텔레그램 이벤트 자동 정리 실패:", error.message);
+  });
+}, TELEGRAM_EVENT_CLEANUP_INTERVAL_MS);
+
 // 새벽 1시 이후 포지션이 없으면 바로, 진행 중이면 종료 직후 마감 안내를 보냅니다.
 setInterval(() => {
   checkDailyCloseNoticeOnce().catch((error) => {
@@ -4742,5 +4796,9 @@ setTimeout(() => {
 
   retryFailedTelegramEvents().catch((error) => {
     console.error("서버 시작 후 텔레그램 이벤트 복구 실패:", error.message);
+  });
+
+  cleanupOldResolvedTelegramEvents().catch((error) => {
+    console.error("서버 시작 후 완료된 텔레그램 이벤트 정리 실패:", error.message);
   });
 }, 1000);
