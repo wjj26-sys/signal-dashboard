@@ -18,6 +18,7 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SOURCE_CHAT_ID = process.env.SOURCE_CHAT_ID;
 const SOURCE_CHAT_ID_2 = process.env.SOURCE_CHAT_ID_2;
+const SOURCE_CHAT_ID_3 = process.env.SOURCE_CHAT_ID_3;
 const TARGET_CHAT_ID = process.env.TARGET_CHAT_ID;
 const TARGET_CHAT_ID_2 = process.env.TARGET_CHAT_ID_2 || "";
 const VANTAGE_TICK_TOKEN = process.env.VANTAGE_TICK_TOKEN || "";
@@ -289,23 +290,30 @@ function roundAutoTpPrice(direction, value) {
   return Math.ceil(price);
 }
 
-function hasTradeSetupText(message) {
+function hasTradeSetupText(message, sourceRoom = "") {
   const text = getMessageText(message);
 
   if (!text) return false;
 
   const hasSymbol = /XAUUSD|GOLD/i.test(text);
+  const hasDirection = /\b(BUY|SELL|LONG|SHORT)\b|롱|숏|상승|하락/i.test(text);
   const hasEntry1 = /1\s*차\s*진입가/i.test(text);
+  const hasSingleEntry = /(?:1\s*차\s*)?진입가\s*[:：]?\s*[-+]?\d/i.test(text);
   const hasEntry2 = /2\s*차\s*진입가/i.test(text);
   const hasTp = /TP|익절가/i.test(text);
   const hasSl = /SL|손절가/i.test(text);
 
+  if (isSingleEntrySourceRoom(sourceRoom)) {
+    return hasDirection && hasSingleEntry && hasTp && hasSl;
+  }
+
   return hasSymbol && hasEntry1 && hasEntry2 && hasTp && hasSl;
 }
 
-function parseTelegramTradeSetup(message) {
+function parseTelegramTradeSetup(message, options = {}) {
   const text = getMessageText(message);
   const upperText = String(text || "").toUpperCase();
+  const singleEntryMode = Boolean(options.singleEntryMode);
 
   let direction = null;
 
@@ -329,13 +337,17 @@ function parseTelegramTradeSetup(message) {
 
   const baseEntry = parseSignalNumber(
     text,
-    /1\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+    singleEntryMode
+      ? /(?:1\s*차\s*)?진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+      : /1\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
   );
 
-  const entry2 = parseSignalNumber(
-    text,
-    /2\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
-  );
+  const entry2 = singleEntryMode
+    ? null
+    : parseSignalNumber(
+        text,
+        /2\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
+      );
 
   const firstTp = parseSignalNumber(
     text,
@@ -350,8 +362,8 @@ function parseTelegramTradeSetup(message) {
   const missingValues = [];
 
   if (!direction) missingValues.push("방향");
-  if (baseEntry === null) missingValues.push("1차 진입가");
-  if (entry2 === null) missingValues.push("2차 진입가");
+  if (baseEntry === null) missingValues.push(singleEntryMode ? "진입가" : "1차 진입가");
+  if (!singleEntryMode && entry2 === null) missingValues.push("2차 진입가");
   if (firstTp === null) missingValues.push("TP");
   if (slPrice === null) missingValues.push("손절가");
 
@@ -373,9 +385,13 @@ function parseTelegramTradeSetup(message) {
 
   const isLong = direction === "LONG";
 
-  const validPriceOrder = isLong
-    ? entry2 <= baseEntry && firstTp > baseEntry && slPrice < entry2
-    : entry2 >= baseEntry && firstTp < baseEntry && slPrice > entry2;
+  const validPriceOrder = singleEntryMode
+    ? isLong
+      ? firstTp > baseEntry && slPrice < baseEntry
+      : firstTp < baseEntry && slPrice > baseEntry
+    : isLong
+      ? entry2 <= baseEntry && firstTp > baseEntry && slPrice < entry2
+      : entry2 >= baseEntry && firstTp < baseEntry && slPrice > entry2;
 
   if (!validPriceOrder) {
     return {
@@ -386,13 +402,17 @@ function parseTelegramTradeSetup(message) {
   }
 
   const sign = isLong ? 1 : -1;
+  let secondAverage = null;
+  let secondTp = null;
 
-  // 새 비중: 1차 2랏 + 2차 1랏
-  const secondAverage = (baseEntry * 2 + entry2) / 3;
-  const secondTp = roundAutoTpPrice(
-    direction,
-    secondAverage + sign * tpGap
-  );
+  if (!singleEntryMode) {
+    // 새 비중: 1차 2랏 + 2차 1랏
+    secondAverage = (baseEntry * 2 + entry2) / 3;
+    secondTp = roundAutoTpPrice(
+      direction,
+      secondAverage + sign * tpGap
+    );
+  }
 
   return {
     ok: true,
@@ -421,8 +441,8 @@ function hasSignalImage(message) {
   return Boolean(hasPhoto || hasImageDocument);
 }
 
-function isSignalMessage(message) {
-  return hasSignalImage(message) || hasTradeSetupText(message);
+function isSignalMessage(message, sourceRoom = "") {
+  return hasSignalImage(message) || hasTradeSetupText(message, sourceRoom);
 }
 
 function normalizeChatId(value) {
@@ -433,6 +453,7 @@ function getSourceRoom(sourceChatId) {
   const chatId = normalizeChatId(sourceChatId);
   const sourceChatId1 = normalizeChatId(SOURCE_CHAT_ID);
   const sourceChatId2 = normalizeChatId(SOURCE_CHAT_ID_2);
+  const sourceChatId3 = normalizeChatId(SOURCE_CHAT_ID_3);
 
   if (sourceChatId1 && chatId === sourceChatId1) {
     return "1번방";
@@ -442,7 +463,15 @@ function getSourceRoom(sourceChatId) {
     return "2번방";
   }
 
+  if (sourceChatId3 && chatId === sourceChatId3) {
+    return "3번방";
+  }
+
   return null;
+}
+
+function isSingleEntrySourceRoom(sourceRoom) {
+  return String(sourceRoom || "").trim() === "3번방";
 }
 
 function requireSupabase() {
@@ -1875,6 +1904,38 @@ const PRICE_POLL_SECONDS = Math.max(
   Number(process.env.PRICE_POLL_SECONDS || 5)
 );
 
+// 실제 거래소 체결 여유값입니다.
+// 텔레그램 문구/차트/저장 원본 가격은 그대로 두고, 자동 감시 판단에만 적용합니다.
+const WATCH_FILL_BUFFER = Math.max(
+  0,
+  Number(process.env.WATCH_FILL_BUFFER || 0.3)
+);
+
+function getBufferedWatchPrice(direction, value, eventType) {
+  const price = Number(value);
+
+  if (!Number.isFinite(price)) return null;
+
+  const normalizedDirection = String(direction || "").toUpperCase();
+  const directionSign = normalizedDirection === "SHORT" || normalizedDirection === "SELL"
+    ? -1
+    : 1;
+
+  let adjustedPrice = price;
+
+  // LONG: TP/2차 +0.3, SL -0.3
+  // SHORT: TP/2차 -0.3, SL +0.3
+  if (eventType === "TP" || eventType === "ENTRY") {
+    adjustedPrice = price + directionSign * WATCH_FILL_BUFFER;
+  }
+
+  if (eventType === "SL") {
+    adjustedPrice = price - directionSign * WATCH_FILL_BUFFER;
+  }
+
+  return Number(adjustedPrice.toFixed(3));
+}
+
 const VANTAGE_MAX_STALE_SECONDS = Math.max(
   10,
   Number(process.env.VANTAGE_MAX_STALE_SECONDS || 60)
@@ -2034,7 +2095,7 @@ async function handleSignalMessage(message) {
     return;
   }
 
-  if (!isSignalMessage(message)) {
+  if (!isSignalMessage(message, sourceRoom)) {
     return;
   }
 
@@ -2153,7 +2214,7 @@ async function handleSignalMessage(message) {
     console.log("신호 전달 완료:", savedSignal);
 
     try {
-      const autoResult = await saveSetupAndStartWatchFromTelegram(message);
+      const autoResult = await saveSetupAndStartWatchFromTelegram(message, sourceRoom);
 
       console.log("텔레그램 계산값 자동 저장 완료:", {
         direction: autoResult.setup.direction,
@@ -2264,12 +2325,12 @@ async function startAutomaticTradeWatch(setupRow) {
   const firstTp = toWatchNumber(setupRow.first_tp);
   const secondTp = toWatchNumber(setupRow.second_tp);
   const slPrice = toWatchNumber(setupRow.sl_price);
+  const singleEntryWatch = entry2 === null && secondTp === null;
 
   if (
-    entry2 === null ||
     firstTp === null ||
-    secondTp === null ||
-    slPrice === null
+    slPrice === null ||
+    (!singleEntryWatch && (entry2 === null || secondTp === null))
   ) {
     throw new Error(
       "자동 감시 시작 실패: 진입가·TP·손절가 중 비어 있는 값이 있습니다."
@@ -2315,8 +2376,10 @@ async function startAutomaticTradeWatch(setupRow) {
   return data;
 }
 
-async function saveSetupAndStartWatchFromTelegram(message) {
-  const parsed = parseTelegramTradeSetup(message);
+async function saveSetupAndStartWatchFromTelegram(message, sourceRoom = "") {
+  const parsed = parseTelegramTradeSetup(message, {
+    singleEntryMode: isSingleEntrySourceRoom(sourceRoom),
+  });
 
   if (!parsed.ok) {
     throw new Error(parsed.error);
@@ -2699,33 +2762,39 @@ function makeSlReachMessage() {
 }
 
 function hasTouchedEntry(direction, price, entry) {
-  if (entry === null) return false;
+  const bufferedEntry = getBufferedWatchPrice(direction, entry, "ENTRY");
+
+  if (bufferedEntry === null) return false;
 
   if (direction === "LONG") {
-    return price <= entry;
+    return price <= bufferedEntry;
   }
 
-  return price >= entry;
+  return price >= bufferedEntry;
 }
 
 function hasTouchedTp(direction, price, tp) {
-  if (tp === null) return false;
+  const bufferedTp = getBufferedWatchPrice(direction, tp, "TP");
+
+  if (bufferedTp === null) return false;
 
   if (direction === "LONG") {
-    return price >= tp;
+    return price >= bufferedTp;
   }
 
-  return price <= tp;
+  return price <= bufferedTp;
 }
 
 function hasTouchedSl(direction, price, sl) {
-  if (sl === null) return false;
+  const bufferedSl = getBufferedWatchPrice(direction, sl, "SL");
+
+  if (bufferedSl === null) return false;
 
   if (direction === "LONG") {
-    return price <= sl;
+    return price <= bufferedSl;
   }
 
-  return price >= sl;
+  return price >= bufferedSl;
 }
 
 async function getCurrentTradeSetup() {
@@ -3222,13 +3291,16 @@ function buildAutomaticPositionResults({
       entryPrice: setup?.base_entry,
       lot: AUTO_POSITION_LOTS[1],
     },
-    {
+  ];
+
+  if (toWatchNumber(setup?.entry2) !== null) {
+    rounds.push({
       round: 2,
       roundText: "2차",
       entryPrice: setup?.entry2,
       lot: AUTO_POSITION_LOTS[2],
-    },
-  ];
+    });
+  }
 
   return rounds.map((item) => {
     if (item.round > enteredRound) {
