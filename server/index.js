@@ -2417,7 +2417,10 @@ async function startAutomaticTradeWatch(
         third_tp: singleEntryMode ? null : secondTp,
         sl_price: slPrice,
         active_tp: firstTp,
-        sent_entry2: false,
+        // 3번방 단타모드는 2차 진입을 기다리지 않는 포지션입니다.
+        // true는 "2차 진입 완료"가 아니라 "2차 단계 건너뜀" 표시로만 사용하고,
+        // TP/SL 감시는 아래 자동감시 루프에서 계속 유지합니다.
+        sent_entry2: singleEntryMode ? true : false,
         sent_entry3: false,
         sent_tp: false,
         sent_sl: false,
@@ -3757,12 +3760,20 @@ async function checkTradeWatchOnce(options = {}) {
     await updateTradeWatchHeartbeat(db, price);
 
     const direction = watch.direction || "LONG";
-    const singleEntryMode = isSingleEntrySourceRoom(activeSignal?.sourceRoom);
 
     const entry2 = toWatchNumber(watch.entry2);
     const firstTp = toWatchNumber(watch.first_tp);
     const secondTp = toWatchNumber(watch.second_tp);
     const slPrice = toWatchNumber(watch.sl_price);
+
+    // 3번방 단타모드는 2차 진입이 없는 "진행중 포지션"입니다.
+    // sourceRoom이 3번방이면 단타모드로 확정하고,
+    // 서버 재시작/상태 복구 중에도 entry2·secondTp가 모두 비어 있으면 1차 전용 감시로 안전하게 처리합니다.
+    // 이 조건은 2차 진입 감시만 건너뛰고, TP/SL 감시는 반드시 유지합니다.
+    const singleEntryMode =
+      isSingleEntrySourceRoom(activeSignal?.sourceRoom) ||
+      (entry2 === null && secondTp === null);
+
     const entry2TriggerPrice = singleEntryMode
       ? null
       : getBufferedWatchPrice(direction, entry2, "entry");
@@ -3824,7 +3835,10 @@ async function checkTradeWatchOnce(options = {}) {
       return;
     }
 
-    const stage = getConfirmedWatchStage(watch);
+    // 3번방 단타모드는 sent_entry2가 true여도 2차 TP를 쓰지 않습니다.
+    // sent_entry2=true는 2차 진입 완료가 아니라 2차 단계 건너뜀 표시이므로,
+    // TP 판단은 항상 1차 TP 기준으로 고정합니다.
+    const stage = singleEntryMode ? 1 : getConfirmedWatchStage(watch);
 
     // 1차 상태에서는 2차 진입만 처리합니다.
     if (
@@ -3895,8 +3909,14 @@ async function checkTradeWatchOnce(options = {}) {
       !watch.sent_sl &&
       hasTouchedTp(direction, price, tpTriggerPrice)
     ) {
-      const stageRequirements =
-        stage === 2
+      const stageRequirements = singleEntryMode
+        ? {
+            // 3번방 단타모드는 sent_entry2 값이 true/false 어느 쪽이어도
+            // TP 선점을 허용합니다. 2차 단계가 없기 때문입니다.
+            sent_entry3: false,
+            sent_sl: false,
+          }
+        : stage === 2
           ? {
               sent_entry2: true,
               sent_entry3: false,
