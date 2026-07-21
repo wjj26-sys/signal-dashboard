@@ -69,7 +69,6 @@ const DAILY_CLOSE_NOTICE_TEXT = `# BW # Quant AI 시그널
 const TELEGRAM_EVENT_PROCESSING_TIMEOUT_MS = 2 * 60 * 1000;
 const TELEGRAM_EVENT_RETRY_TYPES = [
   "NEW_SIGNAL_COPY",
-  "ENTRY2",
   "TP",
   "SL",
   "MARKET_CLOSE",
@@ -164,7 +163,7 @@ function getAutoScheduleState() {
     - 토요일·일요일 신규 신호 잠금
 
     금요일 23:00 ~ 토요일 01:00은 금요일 야간 세션으로 봅니다.
-    이미 진행 중인 포지션의 2차 진입/TP/SL 감시는
+    이미 진행 중인 포지션의 TP/SL 감시는
     이 시간표와 별개로 포지션 종료 시까지 계속 작동합니다.
   */
   const isMondayDay =
@@ -276,18 +275,6 @@ function parseSignalNumber(text, pattern) {
   const number = Number(String(match[1]).replace(/,/g, ""));
 
   return Number.isFinite(number) ? number : null;
-}
-
-function roundAutoTpPrice(direction, value) {
-  const price = Number(value);
-
-  if (!Number.isFinite(price)) return null;
-
-  if (direction === "SHORT") {
-    return Math.floor(price);
-  }
-
-  return Math.ceil(price);
 }
 
 function isSingleEntrySourceRoom(sourceRoom) {
@@ -411,95 +398,6 @@ function parseSingleEntryTradeSetup(message) {
       secondTp: null,
       slPrice,
       singleEntryMode: true,
-    },
-  };
-}
-
-function parseMultiEntryTradeSetup(message) {
-  const text = getMessageText(message);
-  const direction = parseTelegramDirectionFromText(text);
-
-  const baseEntry = parseSignalNumber(
-    text,
-    /1\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
-  );
-
-  const entry2 = parseSignalNumber(
-    text,
-    /2\s*차\s*진입가\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
-  );
-
-  const firstTp = parseSignalNumber(
-    text,
-    /(?:TP\s*(?:\(\s*익절가\s*\))?|익절가)\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
-  );
-
-  const slPrice = parseSignalNumber(
-    text,
-    /(?:SL\s*(?:\(\s*손절가\s*\))?|손절가)\s*[:：]?\s*([-+]?\d[\d,]*(?:\.\d+)?)/i
-  );
-
-  const missingValues = [];
-
-  if (!direction) missingValues.push("방향");
-  if (baseEntry === null) missingValues.push("1차 진입가");
-  if (entry2 === null) missingValues.push("2차 진입가");
-  if (firstTp === null) missingValues.push("TP");
-  if (slPrice === null) missingValues.push("손절가");
-
-  if (missingValues.length > 0) {
-    return {
-      ok: false,
-      error: `자동 추출 실패: ${missingValues.join(", ")} 값을 찾지 못했습니다.`,
-    };
-  }
-
-  const tpGap = Math.abs(firstTp - baseEntry);
-
-  if (!Number.isFinite(tpGap) || tpGap <= 0) {
-    return {
-      ok: false,
-      error: "자동 추출 실패: TP 간격이 올바르지 않습니다.",
-    };
-  }
-
-  const isLong = direction === "LONG";
-
-  const validPriceOrder = isLong
-    ? entry2 <= baseEntry && firstTp > baseEntry && slPrice < entry2
-    : entry2 >= baseEntry && firstTp < baseEntry && slPrice > entry2;
-
-  if (!validPriceOrder) {
-    return {
-      ok: false,
-      error:
-        "자동 추출 실패: 방향과 진입가·TP·손절가의 가격 순서가 맞지 않습니다.",
-    };
-  }
-
-  const sign = isLong ? 1 : -1;
-
-  // 새 비중: 1차 2랏 + 2차 1랏
-  const secondAverage = (baseEntry * 2 + entry2) / 3;
-  const secondTp = roundAutoTpPrice(
-    direction,
-    secondAverage + sign * tpGap
-  );
-
-  return {
-    ok: true,
-    setup: {
-      tradeDate: getTodayLogDate(),
-      symbol: "XAUUSD",
-      direction,
-      baseEntry,
-      entry2,
-      tpGap,
-      firstTp,
-      secondAverage,
-      secondTp,
-      slPrice,
-      singleEntryMode: false,
     },
   };
 }
@@ -1706,7 +1604,7 @@ async function cancelPendingTelegramEventsForSignal(
 ) {
   if (signalLogId === null || signalLogId === undefined) return;
 
-  const protectedTypes = ["ENTRY2", "TP", "SL", "MARKET_CLOSE"];
+  const protectedTypes = ["TP", "SL", "MARKET_CLOSE"];
   const cancellableStatuses = ["pending", "failed", "processing"];
 
   if (!supabase) {
@@ -1811,7 +1709,6 @@ async function hasUnresolvedPositionTelegramEvents(tradeDate) {
   // NEW_SIGNAL / NEW_SIGNAL_COPY needs_check는 중복방지 기록으로 남기되,
   // 포지션이 종료된 뒤 마감멘트까지 막지는 않습니다.
   const protectedTypes = [
-    "ENTRY2",
     "TP",
     "SL",
     "MARKET_CLOSE",
@@ -1918,7 +1815,7 @@ async function checkDailyCloseNoticeOnce(options = {}) {
       return false;
     }
 
-    // 2차 진입·TP·SL·시장가 종료 메시지가 전송 완료되기 전에는
+    // TP·SL·시장가 종료 메시지가 전송 완료되기 전에는
     // 마감 안내를 먼저 보내지 않습니다.
     if (await hasUnresolvedPositionTelegramEvents(tradeDate)) {
       return false;
@@ -2369,25 +2266,16 @@ async function saveAutomaticTradeSetup(setup) {
         symbol: setup.symbol || "XAUUSD",
         direction: setup.direction || "LONG",
         base_entry: toNullableNumber(setup.baseEntry),
-        entry2: toNullableNumber(setup.entry2),
-
-        // B방 전체 1차 전용 모드에서는 2차·3차 값이 없으므로 null로 유지합니다.
-        entry3: setup.singleEntryMode ? null : toNullableNumber(setup.entry2),
-
+        // B방 v11부터 모든 원본방은 1차 전용입니다.
+        // 2차 관련 DB 컬럼은 호환을 위해 남기되 값은 항상 null로 저장합니다.
+        entry2: null,
+        entry3: null,
         tp_gap: toNullableNumber(setup.tpGap),
         first_tp: toNullableNumber(setup.firstTp),
-        second_average: setup.singleEntryMode
-          ? null
-          : toNullableNumber(setup.secondAverage),
-        second_tp: setup.singleEntryMode
-          ? null
-          : toNullableNumber(setup.secondTp),
-        third_average: setup.singleEntryMode
-          ? null
-          : toNullableNumber(setup.secondAverage),
-        third_tp: setup.singleEntryMode
-          ? null
-          : toNullableNumber(setup.secondTp),
+        second_average: null,
+        second_tp: null,
+        third_average: null,
+        third_tp: null,
         sl_price: toNullableNumber(setup.slPrice),
       },
       {
@@ -2404,24 +2292,16 @@ async function saveAutomaticTradeSetup(setup) {
 
 async function startAutomaticTradeWatch(
   setupRow,
-  { singleEntryMode = false } = {}
+  { singleEntryMode = true } = {}
 ) {
   const db = requireSupabase();
 
-  const entry2 = toWatchNumber(setupRow.entry2);
   const firstTp = toWatchNumber(setupRow.first_tp);
-  const secondTp = toWatchNumber(setupRow.second_tp);
   const slPrice = toWatchNumber(setupRow.sl_price);
 
   if (firstTp === null || slPrice === null) {
     throw new Error(
       "자동 감시 시작 실패: TP·손절가 중 비어 있는 값이 있습니다."
-    );
-  }
-
-  if (!singleEntryMode && (entry2 === null || secondTp === null)) {
-    throw new Error(
-      "자동 감시 시작 실패: 2차 진입형 감시에는 2차 진입가와 2차 TP가 필요합니다."
     );
   }
 
@@ -2433,20 +2313,16 @@ async function startAutomaticTradeWatch(
         is_active: true,
         symbol: setupRow.symbol || "XAUUSD",
         direction: setupRow.direction || "LONG",
-        entry2: singleEntryMode ? null : entry2,
-
-        // 기존 DB 컬럼 호환용 값이며 실제 3차 진입은 처리하지 않습니다.
-        entry3: singleEntryMode ? null : entry2,
-
+        entry2: null,
+        entry3: null,
         first_tp: firstTp,
-        second_tp: singleEntryMode ? null : secondTp,
-        third_tp: singleEntryMode ? null : secondTp,
+        second_tp: null,
+        third_tp: null,
         sl_price: slPrice,
         active_tp: firstTp,
-        // 1차 전용 모드는 2차 진입을 기다리지 않는 포지션입니다.
-        // true는 "2차 진입 완료"가 아니라 "2차 단계 건너뜀" 표시로만 사용하고,
-        // TP/SL 감시는 아래 자동감시 루프에서 계속 유지합니다.
-        sent_entry2: singleEntryMode ? true : false,
+        // B방 v11은 모든 방이 1차 전용입니다.
+        // true는 기존 컬럼 호환용 표시이며 실제 2차 진입은 없습니다.
+        sent_entry2: true,
         sent_entry3: false,
         sent_tp: false,
         sent_sl: false,
@@ -2468,7 +2344,7 @@ async function startAutomaticTradeWatch(
 }
 
 async function saveSetupAndStartWatchFromTelegram(message, sourceRoom = "") {
-  const singleEntryMode = isSingleEntrySourceRoom(sourceRoom);
+  const singleEntryMode = true;
   const parsed = parseTelegramTradeSetup(message, sourceRoom);
 
   if (!parsed.ok) {
@@ -2483,7 +2359,7 @@ async function saveSetupAndStartWatchFromTelegram(message, sourceRoom = "") {
     singleEntryMode,
   });
 
-  // 1차 전용 신호는 2차 진입 단계가 없어서 신호 직후 바로 TP/SL 감시에 붙어야 합니다.
+  // 1차 전용 신호는 신호 직후 바로 TP/SL 감시에 붙어야 합니다.
   // 다만 첫 가격 체크에서는 멘트를 보내지 않고 기준 가격(last_price)만 저장합니다.
   // 실제 TP/SL 판단은 다음 체크부터 직전 가격 -> 현재 가격의 이동으로만 처리합니다.
   if (singleEntryMode) {
@@ -2543,17 +2419,15 @@ app.post("/api/trade-setup", async (req, res) => {
           symbol: payload.symbol || "XAUUSD",
           direction: payload.direction || "LONG",
           base_entry: toNullableNumber(payload.baseEntry),
-          entry2: toNullableNumber(payload.entry2),
-
-          // 기존 Supabase 컬럼 호환용 값
-          entry3: toNullableNumber(payload.entry2),
-
+          // B방 v11은 수동 저장 API로 들어온 값도 1차 전용으로 고정합니다.
+          entry2: null,
+          entry3: null,
           tp_gap: toNullableNumber(payload.tpGap),
           first_tp: toNullableNumber(payload.firstTp),
-          second_average: toNullableNumber(payload.secondAverage),
-          second_tp: toNullableNumber(payload.secondTp),
-          third_average: toNullableNumber(payload.secondAverage),
-          third_tp: toNullableNumber(payload.secondTp),
+          second_average: null,
+          second_tp: null,
+          third_average: null,
+          third_tp: null,
           sl_price: toNullableNumber(payload.slPrice),
         },
         {
@@ -2823,38 +2697,6 @@ async function saveXauUsdPriceTick(priceData, source = "manual") {
     console.error("가격 기록 저장 실패:", error.message);
     return null;
   }
-}
-
-function makeEntryReachMessage({ direction, round, entry, tp, sl }) {
-  const isLong = direction === "LONG";
-
-  const header = isLong
-    ? `🟢🟢🟢상승🟢🟢🟢
-🟢🟢🟢상승🟢🟢🟢`
-    : `🔴🔴🔴하락🔴🔴🔴
-🔴🔴🔴하락🔴🔴🔴`;
-
-  const roundLabel = `${round}회차`;
-  const orderLabel =
-    round === 2 ? "1회차 / 2회차" : "1회차 / 2회차 / 3회차";
-  const lot = round === 3 ? "2랏" : "1랏";
-
-  return `${header}
- 
-- ${roundLabel} 진입가 도달
-- ${roundLabel} 예약매매 진행 안하신분들 매수 진행
-- ${orderLabel} 주문 아래 TP로 수정 부탁드리겠습니다.
-
-XAUUSD(금/GOLD)
-
-📍 ${roundLabel} 진입가 : ${formatWatchPrice(entry)}
-📍 비중 : ${lot}
-
-✅ TP(익절가) : ${formatWatchPrice(tp)} (수정값)
-🛑 SL(손절가) : ${formatWatchPrice(sl)}
-
-※본인 시드에 따라 다르게 적용
-※투자 관련 책임 / 권리는 투자자 본인에게`;
 }
 
 function makeTpReachMessage() {
@@ -3282,9 +3124,7 @@ app.post("/api/trade-watch/start", async (req, res) => {
       });
     }
 
-    const entry2 = toWatchNumber(setup.entry2);
     const firstTp = toWatchNumber(setup.first_tp);
-    const secondTp = toWatchNumber(setup.second_tp);
     const slPrice = toWatchNumber(setup.sl_price);
 
     if (firstTp === null || slPrice === null) {
@@ -3442,21 +3282,15 @@ function getTradeDateForWatch(watch) {
 }
 
 function getConfirmedWatchStage(watch) {
-  if (watch?.sent_entry2) return 2;
   return 1;
 }
 
-function getTpForWatchStage({ stage, firstTp, secondTp }) {
-  if (stage === 2) {
-    return secondTp ?? firstTp;
-  }
-
+function getTpForWatchStage({ firstTp }) {
   return firstTp;
 }
 
 const AUTO_POSITION_LOTS = {
-  1: 2,
-  2: 1,
+  1: 1,
 };
 
 const XAUUSD_VALUE_PER_LOT = 100;
@@ -3511,8 +3345,7 @@ function buildAutomaticPositionResults({
   exitPrice,
   reason,
 }) {
-  const singleEntryMode = isSingleEntrySourceRoom(activeSignal?.sourceRoom);
-  const enteredRound = singleEntryMode ? 1 : getConfirmedWatchStage(watch);
+  const enteredRound = 1;
   const forceLoss = String(reason || "").toUpperCase() === "SL";
 
   const rounds = [
@@ -3523,15 +3356,6 @@ function buildAutomaticPositionResults({
       lot: AUTO_POSITION_LOTS[1],
     },
   ];
-
-  if (!singleEntryMode) {
-    rounds.push({
-      round: 2,
-      roundText: "2차",
-      entryPrice: setup?.entry2,
-      lot: AUTO_POSITION_LOTS[2],
-    });
-  }
 
   return rounds.map((item) => {
     if (item.round > enteredRound) {
@@ -3860,7 +3684,7 @@ async function checkTradeWatchOnce(options = {}) {
     }
 
     // 진행 중인 시그널이 없으면 남아 있는 감시 상태만 조용히 끄고
-    // 2차/TP/SL 문자는 절대 보내지 않습니다.
+    // TP/SL 문자는 절대 보내지 않습니다.
     if (!activeSignal) {
       try {
         await stopTradeWatchState("no_active_signal_silent_stop");
@@ -3885,7 +3709,7 @@ async function checkTradeWatchOnce(options = {}) {
     if (!watch) return;
 
     // 중요: botEnabled/관리자 잠금은 신규 신호와 마감 멘트만 막습니다.
-    // 이미 진행 중인 포지션의 2차 진입/TP/SL 감시는 01:00 이후나 잠금 상태에서도 계속 유지해야 합니다.
+    // 이미 진행 중인 포지션의 TP/SL 감시는 01:00 이후나 잠금 상태에서도 계속 유지해야 합니다.
     const priceData = options.priceData || (await fetchXauUsdPrice());
 
     if (!options.priceData && PRICE_PROVIDER !== "vantage_mt5") {
@@ -3906,22 +3730,12 @@ async function checkTradeWatchOnce(options = {}) {
 
     const direction = watch.direction || "LONG";
 
-    const entry2 = toWatchNumber(watch.entry2);
     const firstTp = toWatchNumber(watch.first_tp);
-    const secondTp = toWatchNumber(watch.second_tp);
     const slPrice = toWatchNumber(watch.sl_price);
 
-    // B방 1차 전용 모드는 2차 진입이 없는 "진행중 포지션"입니다.
-    // sourceRoom이 1번방·2번방·3번방이면 1차 전용으로 확정하고,
-    // 서버 재시작/상태 복구 중에도 entry2·secondTp가 모두 비어 있으면 1차 전용 감시로 안전하게 처리합니다.
-    // 이 조건은 2차 진입 감시만 건너뛰고, TP/SL 감시는 반드시 유지합니다.
-    const singleEntryMode =
-      isSingleEntrySourceRoom(activeSignal?.sourceRoom) ||
-      (entry2 === null && secondTp === null);
-
-    const entry2TriggerPrice = singleEntryMode
-      ? null
-      : getBufferedWatchPrice(direction, entry2, "entry");
+    // B방 v11은 1번방·2번방·3번방 모두 1차 전용입니다.
+    // 2차 진입 감시와 2차 멘트 발송 루트는 사용하지 않습니다.
+    const singleEntryMode = true;
     const slTriggerPrice = getBufferedWatchPrice(direction, slPrice, "sl");
 
     // 1차 전용 신호는 첫 체크에서 바로 TP/SL 멘트를 보내지 않습니다.
@@ -3935,9 +3749,9 @@ async function checkTradeWatchOnce(options = {}) {
 
     /*
       중요 처리 순서
-      1. SL은 어떤 회차에서도 최우선으로 1회만 처리
-      2. 1차 상태에서는 2차 진입만 처리하고 즉시 종료
-      3. TP는 DB에 확정된 마지막 진입 회차의 TP만 사용
+      1. SL은 최우선으로 1회만 처리
+      2. 2차 진입 단계는 사용하지 않음
+      3. TP는 1차 TP 기준으로만 처리
     */
 
     if (
@@ -4003,79 +3817,11 @@ async function checkTradeWatchOnce(options = {}) {
       return;
     }
 
-    // 1차 전용 모드는 sent_entry2가 true여도 2차 TP를 쓰지 않습니다.
-    // sent_entry2=true는 2차 진입 완료가 아니라 2차 단계 건너뜀 표시이므로,
-    // TP 판단은 항상 1차 TP 기준으로 고정합니다.
-    const stage = singleEntryMode ? 1 : getConfirmedWatchStage(watch);
-
-    // 1차 상태에서는 2차 진입만 처리합니다.
-    if (
-      !singleEntryMode &&
-      stage === 1 &&
-      entry2 !== null &&
-      secondTp !== null &&
-      hasTouchedOrCrossedWatchLevel({
-        direction,
-        previousPrice,
-        currentPrice: price,
-        level: entry2TriggerPrice,
-        triggerType: "entry",
-      })
-    ) {
-      const nextTp = secondTp ?? firstTp;
-
-      const entry2EventKey =
-        `${getTradeWatchEventPrefix(watch)}:ENTRY2`;
-
-      const entry2SendResult = await sendTelegramEventToTargets({
-        eventKey: entry2EventKey,
-        tradeDate: getTradeDateForWatch(watch),
-        eventType: "ENTRY2",
-        signalLogId: activeSignal?.id || null,
-        method: "sendMessage",
-        body: {
-          text: makeEntryReachMessage({
-            direction,
-            round: 2,
-            entry: entry2,
-            tp: nextTp,
-            sl: slPrice,
-          }),
-        },
-        requirePrimarySent: false,
-      });
-
-      if (entry2SendResult.hasNeedsCheck) {
-        console.error(
-          `2차 진입 메시지 일부 전달방 전송 여부 확인 필요: ${entry2EventKey}`
-        );
-      }
-
-      const claimedEntry2 = await claimTradeWatchEvent(db, {
-        flagColumn: "sent_entry2",
-        updates: {
-          active_tp: nextTp,
-          last_price: price,
-          last_checked_at: new Date().toISOString(),
-        },
-        requiredValues: {
-          sent_entry3: false,
-          sent_tp: false,
-          sent_sl: false,
-        },
-      });
-
-      if (!claimedEntry2) return;
-
-      return;
-    }
+    // B방 v11은 모든 방이 1차 전용이므로 TP 판단은 항상 1차 TP 기준으로 고정합니다.
+    const stage = 1;
 
     // TP는 active_tp 값을 맹신하지 않고, DB에 확정된 진입 회차로 다시 계산합니다.
-    const confirmedTp = getTpForWatchStage({
-      stage,
-      firstTp,
-      secondTp,
-    });
+    const confirmedTp = getTpForWatchStage({ firstTp });
     const tpTriggerPrice = getBufferedWatchPrice(direction, confirmedTp, "tp");
 
     if (
@@ -4097,24 +3843,10 @@ async function checkTradeWatchOnce(options = {}) {
             triggerType: "tp",
           }))
     ) {
-      const stageRequirements = singleEntryMode
-        ? {
-            // 1차 전용 모드는 sent_entry2 값이 true/false 어느 쪽이어도
-            // TP 선점을 허용합니다. 2차 단계가 없기 때문입니다.
-            sent_entry3: false,
-            sent_sl: false,
-          }
-        : stage === 2
-          ? {
-              sent_entry2: true,
-              sent_entry3: false,
-              sent_sl: false,
-            }
-          : {
-              sent_entry2: false,
-              sent_entry3: false,
-              sent_sl: false,
-            };
+      const stageRequirements = {
+        sent_entry3: false,
+        sent_sl: false,
+      };
 
       const tpEventKey =
         `${getTradeWatchEventPrefix(watch)}:TP`;
