@@ -291,7 +291,10 @@ function roundAutoTpPrice(direction, value) {
 }
 
 function isSingleEntrySourceRoom(sourceRoom) {
-  return String(sourceRoom || "").trim() === "3번방";
+  const room = String(sourceRoom || "").trim();
+
+  // B방은 1번방·2번방·3번방 모두 1차 진입 전용으로 운영합니다.
+  return room === "1번방" || room === "2번방" || room === "3번방";
 }
 
 function hasMultiEntryTradeSetupText(text) {
@@ -318,9 +321,8 @@ function hasTradeSetupText(message, sourceRoom = "") {
 
   if (!text) return false;
 
-  return isSingleEntrySourceRoom(sourceRoom)
-    ? hasSingleEntryTradeSetupText(text)
-    : hasMultiEntryTradeSetupText(text);
+  // B방은 모든 원본방을 1차 진입 전용 양식으로 봅니다.
+  return hasSingleEntryTradeSetupText(text);
 }
 
 function parseTelegramDirectionFromText(text) {
@@ -503,9 +505,8 @@ function parseMultiEntryTradeSetup(message) {
 }
 
 function parseTelegramTradeSetup(message, sourceRoom = "") {
-  return isSingleEntrySourceRoom(sourceRoom)
-    ? parseSingleEntryTradeSetup(message)
-    : parseMultiEntryTradeSetup(message);
+  // B방은 1번방·2번방·3번방 모두 1차 진입 전용 양식으로 파싱합니다.
+  return parseSingleEntryTradeSetup(message);
 }
 
 function hasSignalImage(message) {
@@ -1977,10 +1978,36 @@ const PRICE_POLL_SECONDS = Math.max(
   Number(process.env.PRICE_POLL_SECONDS || 5)
 );
 
-const WATCH_FILL_BUFFER = Math.max(
-  0,
-  Number(process.env.WATCH_FILL_BUFFER || 0.3)
-);
+const WATCH_FILL_BUFFER_DEFAULT = 0.3;
+const WATCH_FILL_BUFFER_MAX = 0.3;
+
+function readWatchFillBuffer() {
+  const rawValue = process.env.WATCH_FILL_BUFFER;
+
+  if (rawValue === undefined || rawValue === null || rawValue === "") {
+    return WATCH_FILL_BUFFER_DEFAULT;
+  }
+
+  const parsed = Number(rawValue);
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(
+      `WATCH_FILL_BUFFER 값이 올바르지 않아 기본값 ${WATCH_FILL_BUFFER_DEFAULT}으로 적용합니다: ${rawValue}`
+    );
+    return WATCH_FILL_BUFFER_DEFAULT;
+  }
+
+  if (parsed > WATCH_FILL_BUFFER_MAX) {
+    console.warn(
+      `WATCH_FILL_BUFFER 값이 ${WATCH_FILL_BUFFER_MAX}을 초과해 안전상 ${WATCH_FILL_BUFFER_DEFAULT}으로 보정합니다: ${rawValue}`
+    );
+    return WATCH_FILL_BUFFER_DEFAULT;
+  }
+
+  return parsed;
+}
+
+const WATCH_FILL_BUFFER = readWatchFillBuffer();
 
 const VANTAGE_MAX_STALE_SECONDS = Math.max(
   10,
@@ -2344,8 +2371,7 @@ async function saveAutomaticTradeSetup(setup) {
         base_entry: toNullableNumber(setup.baseEntry),
         entry2: toNullableNumber(setup.entry2),
 
-        // 3번방 단타모드는 2차 값이 없으므로 null로 유지합니다.
-        // 1번방/2번방은 기존 2차 값을 그대로 저장합니다.
+        // B방 전체 1차 전용 모드에서는 2차·3차 값이 없으므로 null로 유지합니다.
         entry3: setup.singleEntryMode ? null : toNullableNumber(setup.entry2),
 
         tp_gap: toNullableNumber(setup.tpGap),
@@ -2395,7 +2421,7 @@ async function startAutomaticTradeWatch(
 
   if (!singleEntryMode && (entry2 === null || secondTp === null)) {
     throw new Error(
-      "자동 감시 시작 실패: 1번방/2번방은 2차 진입가와 2차 TP가 필요합니다."
+      "자동 감시 시작 실패: 2차 진입형 감시에는 2차 진입가와 2차 TP가 필요합니다."
     );
   }
 
@@ -2417,7 +2443,7 @@ async function startAutomaticTradeWatch(
         third_tp: singleEntryMode ? null : secondTp,
         sl_price: slPrice,
         active_tp: firstTp,
-        // 3번방 단타모드는 2차 진입을 기다리지 않는 포지션입니다.
+        // 1차 전용 모드는 2차 진입을 기다리지 않는 포지션입니다.
         // true는 "2차 진입 완료"가 아니라 "2차 단계 건너뜀" 표시로만 사용하고,
         // TP/SL 감시는 아래 자동감시 루프에서 계속 유지합니다.
         sent_entry2: singleEntryMode ? true : false,
@@ -2456,6 +2482,20 @@ async function saveSetupAndStartWatchFromTelegram(message, sourceRoom = "") {
   const startedWatch = await startAutomaticTradeWatch(savedSetup, {
     singleEntryMode,
   });
+
+  // 1차 전용 신호는 2차 진입 단계가 없어서 신호 직후 바로 TP/SL 감시에 붙어야 합니다.
+  // 다만 첫 가격 체크에서는 멘트를 보내지 않고 기준 가격(last_price)만 저장합니다.
+  // 실제 TP/SL 판단은 다음 체크부터 직전 가격 -> 현재 가격의 이동으로만 처리합니다.
+  if (singleEntryMode) {
+    setImmediate(() => {
+      checkTradeWatchOnce({
+        trigger: "single_entry_initial_baseline",
+        baselineOnly: true,
+      }).catch((watchError) => {
+        console.error("1차 전용 신호 직후 기준 가격 저장 실패:", watchError.message);
+      });
+    });
+  }
 
   return {
     setup: savedSetup,
@@ -2861,6 +2901,112 @@ function hasTouchedSl(direction, price, sl) {
   return price >= sl;
 }
 
+function hasCrossedWatchLevel(direction, previousPrice, currentPrice, level, triggerType) {
+  const previous = toWatchNumber(previousPrice);
+  const current = toWatchNumber(currentPrice);
+  const target = toWatchNumber(level);
+
+  if (previous === null || current === null || target === null) return false;
+  if (previous === current) return false;
+
+  const normalizedDirection = String(direction || "").toUpperCase();
+  const normalizedType = String(triggerType || "").toLowerCase();
+  const isShort = normalizedDirection === "SHORT" || normalizedDirection === "SELL";
+
+  const crossedUp = previous < target && current >= target;
+  const crossedDown = previous > target && current <= target;
+
+  if (normalizedType === "tp") {
+    return isShort ? crossedDown : crossedUp;
+  }
+
+  if (normalizedType === "sl") {
+    return isShort ? crossedUp : crossedDown;
+  }
+
+  if (normalizedType === "entry") {
+    return isShort ? crossedUp : crossedDown;
+  }
+
+  return crossedUp || crossedDown;
+}
+
+function hasTouchedOrCrossedWatchLevel({
+  direction,
+  previousPrice,
+  currentPrice,
+  level,
+  triggerType,
+}) {
+  const normalizedType = String(triggerType || "").toLowerCase();
+
+  if (normalizedType === "tp") {
+    return (
+      hasTouchedTp(direction, currentPrice, level) ||
+      hasCrossedWatchLevel(direction, previousPrice, currentPrice, level, "tp")
+    );
+  }
+
+  if (normalizedType === "sl") {
+    return (
+      hasTouchedSl(direction, currentPrice, level) ||
+      hasCrossedWatchLevel(direction, previousPrice, currentPrice, level, "sl")
+    );
+  }
+
+  if (normalizedType === "entry") {
+    return (
+      hasTouchedEntry(direction, currentPrice, level) ||
+      hasCrossedWatchLevel(direction, previousPrice, currentPrice, level, "entry")
+    );
+  }
+
+  return hasCrossedWatchLevel(direction, previousPrice, currentPrice, level, normalizedType);
+}
+
+function hasMovedIntoWatchLevelFromBaseline({
+  direction,
+  previousPrice,
+  currentPrice,
+  level,
+  triggerType,
+}) {
+  const previous = toWatchNumber(previousPrice);
+  const current = toWatchNumber(currentPrice);
+  const target = toWatchNumber(level);
+
+  if (previous === null || current === null || target === null) return false;
+  if (previous === current) return false;
+
+  const normalizedDirection = String(direction || "").toUpperCase();
+  const normalizedType = String(triggerType || "").toLowerCase();
+  const isShort = normalizedDirection === "SHORT" || normalizedDirection === "SELL";
+
+  // 1차 전용 신호 안전 판단:
+  // 첫 체크에서 저장한 기준 가격이 정상 구간 또는 경계선에 있었고,
+  // 다음 체크 가격이 TP/SL 쪽으로 실제 이동했을 때만 도달 처리합니다.
+  // 이미 기준 가격이 TP/SL 바깥에 있던 상태라면 즉시 발송하지 않습니다.
+  if (normalizedType === "tp") {
+    return isShort
+      ? previous >= target && current <= target
+      : previous <= target && current >= target;
+  }
+
+  if (normalizedType === "sl") {
+    return isShort
+      ? previous <= target && current >= target
+      : previous >= target && current <= target;
+  }
+
+  if (normalizedType === "entry") {
+    return isShort
+      ? previous <= target && current >= target
+      : previous >= target && current <= target;
+  }
+
+  return hasCrossedWatchLevel(direction, previous, current, target, normalizedType);
+}
+
 function getBufferedWatchPrice(direction, price, triggerType) {
   const number = toWatchNumber(price);
 
@@ -3141,15 +3287,10 @@ app.post("/api/trade-watch/start", async (req, res) => {
     const secondTp = toWatchNumber(setup.second_tp);
     const slPrice = toWatchNumber(setup.sl_price);
 
-    if (
-      entry2 === null ||
-      firstTp === null ||
-      secondTp === null ||
-      slPrice === null
-    ) {
+    if (firstTp === null || slPrice === null) {
       return res.status(400).json({
         ok: false,
-        error: "2차 진입가와 1·2차 TP, SL 손절가가 필요합니다.",
+        error: "1차 TP와 SL 손절가가 필요합니다.",
       });
     }
 
@@ -3161,17 +3302,17 @@ app.post("/api/trade-watch/start", async (req, res) => {
           is_active: true,
           symbol: setup.symbol || "XAUUSD",
           direction: setup.direction || "LONG",
-          entry2,
+          entry2: null,
 
-          // 기존 DB 컬럼 호환용 값
-          entry3: entry2,
+          // B방 전체 1차 전용 모드에서는 기존 DB 컬럼도 null로 유지합니다.
+          entry3: null,
 
           first_tp: firstTp,
-          second_tp: secondTp,
-          third_tp: secondTp,
+          second_tp: null,
+          third_tp: null,
           sl_price: slPrice,
           active_tp: firstTp,
-          sent_entry2: false,
+          sent_entry2: true,
           sent_entry3: false,
           sent_tp: false,
           sent_sl: false,
@@ -3757,6 +3898,10 @@ async function checkTradeWatchOnce(options = {}) {
       throw new Error("자동 감시에 사용할 현재 가격이 올바르지 않습니다.");
     }
 
+    // 선 통과 감지를 위해 이번 체크 직전 DB에 저장되어 있던 마지막 가격을 보관합니다.
+    // heartbeat 업데이트는 아래에서 하더라도 watch 객체에는 이전 값이 남아 있습니다.
+    const previousPrice = toWatchNumber(watch.last_price);
+
     await updateTradeWatchHeartbeat(db, price);
 
     const direction = watch.direction || "LONG";
@@ -3766,8 +3911,8 @@ async function checkTradeWatchOnce(options = {}) {
     const secondTp = toWatchNumber(watch.second_tp);
     const slPrice = toWatchNumber(watch.sl_price);
 
-    // 3번방 단타모드는 2차 진입이 없는 "진행중 포지션"입니다.
-    // sourceRoom이 3번방이면 단타모드로 확정하고,
+    // B방 1차 전용 모드는 2차 진입이 없는 "진행중 포지션"입니다.
+    // sourceRoom이 1번방·2번방·3번방이면 1차 전용으로 확정하고,
     // 서버 재시작/상태 복구 중에도 entry2·secondTp가 모두 비어 있으면 1차 전용 감시로 안전하게 처리합니다.
     // 이 조건은 2차 진입 감시만 건너뛰고, TP/SL 감시는 반드시 유지합니다.
     const singleEntryMode =
@@ -3779,6 +3924,15 @@ async function checkTradeWatchOnce(options = {}) {
       : getBufferedWatchPrice(direction, entry2, "entry");
     const slTriggerPrice = getBufferedWatchPrice(direction, slPrice, "sl");
 
+    // 1차 전용 신호는 첫 체크에서 바로 TP/SL 멘트를 보내지 않습니다.
+    // 첫 체크는 기준 가격 저장용이고, 다음 체크부터 선을 통과했는지 판단합니다.
+    if (singleEntryMode && (options.baselineOnly || previousPrice === null)) {
+      console.log(
+        `1차 전용 기준 가격 저장만 수행: price=${price}, trigger=${options.trigger || "watch"}`
+      );
+      return;
+    }
+
     /*
       중요 처리 순서
       1. SL은 어떤 회차에서도 최우선으로 1회만 처리
@@ -3789,7 +3943,21 @@ async function checkTradeWatchOnce(options = {}) {
     if (
       !watch.sent_sl &&
       !watch.sent_tp &&
-      hasTouchedSl(direction, price, slTriggerPrice)
+      (singleEntryMode
+        ? hasMovedIntoWatchLevelFromBaseline({
+            direction,
+            previousPrice,
+            currentPrice: price,
+            level: slTriggerPrice,
+            triggerType: "sl",
+          })
+        : hasTouchedOrCrossedWatchLevel({
+            direction,
+            previousPrice,
+            currentPrice: price,
+            level: slTriggerPrice,
+            triggerType: "sl",
+          }))
     ) {
       const slEventKey =
         `${getTradeWatchEventPrefix(watch)}:SL`;
@@ -3835,7 +4003,7 @@ async function checkTradeWatchOnce(options = {}) {
       return;
     }
 
-    // 3번방 단타모드는 sent_entry2가 true여도 2차 TP를 쓰지 않습니다.
+    // 1차 전용 모드는 sent_entry2가 true여도 2차 TP를 쓰지 않습니다.
     // sent_entry2=true는 2차 진입 완료가 아니라 2차 단계 건너뜀 표시이므로,
     // TP 판단은 항상 1차 TP 기준으로 고정합니다.
     const stage = singleEntryMode ? 1 : getConfirmedWatchStage(watch);
@@ -3846,7 +4014,13 @@ async function checkTradeWatchOnce(options = {}) {
       stage === 1 &&
       entry2 !== null &&
       secondTp !== null &&
-      hasTouchedEntry(direction, price, entry2TriggerPrice)
+      hasTouchedOrCrossedWatchLevel({
+        direction,
+        previousPrice,
+        currentPrice: price,
+        level: entry2TriggerPrice,
+        triggerType: "entry",
+      })
     ) {
       const nextTp = secondTp ?? firstTp;
 
@@ -3907,11 +4081,25 @@ async function checkTradeWatchOnce(options = {}) {
     if (
       !watch.sent_tp &&
       !watch.sent_sl &&
-      hasTouchedTp(direction, price, tpTriggerPrice)
+      (singleEntryMode
+        ? hasMovedIntoWatchLevelFromBaseline({
+            direction,
+            previousPrice,
+            currentPrice: price,
+            level: tpTriggerPrice,
+            triggerType: "tp",
+          })
+        : hasTouchedOrCrossedWatchLevel({
+            direction,
+            previousPrice,
+            currentPrice: price,
+            level: tpTriggerPrice,
+            triggerType: "tp",
+          }))
     ) {
       const stageRequirements = singleEntryMode
         ? {
-            // 3번방 단타모드는 sent_entry2 값이 true/false 어느 쪽이어도
+            // 1차 전용 모드는 sent_entry2 값이 true/false 어느 쪽이어도
             // TP 선점을 허용합니다. 2차 단계가 없기 때문입니다.
             sent_entry3: false,
             sent_sl: false,
